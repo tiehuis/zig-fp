@@ -25,48 +25,48 @@ zig run fuzz.zig uscale.c -O ReleaseFast
 # precision = null (shortest)
 
 $ zig run perf.zig -O ReleaseFast
-acc: 17661911526791062342
-  pf: format: 22.58ns, parse: 22.25ns
- std: format: 24.98ns, parse: 21.79ns
+acc: 0xf438ef51bb6f4f0c22346
+  pf: format: 29.92ns, parse: 20.94ns
+ std: format: 23.56ns, parse: 20.96ns
 
 $ zig run perf.zig -O ReleaseSafe
-acc: 17661911526791062342
-  pf: format: 32.11ns, parse: 41.76ns
- std: format: 42.87ns, parse: 46.40ns
+acc: 0xf438ef51bb6f4f0c22346
+  pf: format: 21.72ns, parse: 42.29ns
+ std: format: 30.44ns, parse: 44.54ns
 
 $ zig run perf.zig -O ReleaseSmall
-acc: 17661911526791062342
-  pf: format: 51.56ns, parse: 55.52ns
- std: format: 67.45ns, parse: 71.93ns
+acc: 0xf438ef51bb6f4f0c22346
+  pf: format: 26.64ns, parse: 35.06ns
+ std: format: 42.39ns, parse: 53.58ns
 
 $ zig run perf.zig -O Debug
-acc: 17661911526791062342
-  pf: format: 276.49ns, parse: 254.48ns
- std: format: 320.28ns, parse: 515.58ns
+acc: 0xf438ef51bb6f4f0c22346
+  pf: format: 256.36ns, parse: 242.68ns
+ std: format: 300.32ns, parse: 505.41ns
 ```
 
 ```
 # precision = 10 (fixed)
 
 $ zig run perf.zig -O ReleaseFast
-acc: 17661911526882640628
-  pf: format: 19.57ns, parse: 20.45ns
- std: format: 32.34ns, parse: 21.42ns
+acc: 0xf438ef51bb6f4f63782f4
+  pf: format: 19.06ns, parse: 19.37ns
+ std: format: 32.60ns, parse: 20.43ns
 
 $ zig run perf.zig -O ReleaseSafe
-acc: 17661911526882640628
-  pf: format: 37.91ns, parse: 43.09ns
- std: format: 57.60ns, parse: 42.94ns
+acc: 0xf438ef51bb6f4f63782f4
+  pf: format: 20.07ns, parse: 36.54ns
+ std: format: 35.35ns, parse: 41.87ns
 
 $ zig run perf.zig -O ReleaseSmall
-acc: 17661911526882640628
-  pf: format: 40.89ns, parse: 44.96ns
- std: format: 91.21ns, parse: 64.71ns
+acc: 0xf438ef51bb6f4f63782f4
+  pf: format: 23.42ns, parse: 27.83ns
+ std: format: 66.17ns, parse: 45.32ns
 
 $ zig run perf.zig -O Debug
-acc: 17661911526882640628
-  pf: format: 208.71ns, parse: 234.48ns
- std: format: 336.11ns, parse: 452.21ns
+acc: 0xf438ef51bb6f4f63782f4
+  pf: format: 200.11ns, parse: 225.07ns
+ std: format: 325.88ns, parse: 440.74ns
 ```
 
 ## Size

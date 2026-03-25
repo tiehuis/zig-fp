@@ -1,21 +1,22 @@
 const std = @import("std");
+const Io = std.Io;
 const fp = @import("fp.zig");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var prng = prng: {
         var seed: u64 = 0;
-        //try std.posix.getrandom(std.mem.asBytes(&seed));
-        seed = 0;
+        init.io.random(@ptrCast(&seed));
+        seed = 0; // purposefully zero
         break :prng std.Random.DefaultPrng.init(seed);
     };
     const rand = prng.random();
-    var timer = try std.time.Timer.start();
+    var ts: Io.Timestamp = undefined;
 
-    var acc: u64 = 0;
-    var fp_total_format_time: u64 = 0;
-    var fp_total_parse_time: u64 = 0;
-    var std_total_format_time: u64 = 0;
-    var std_total_parse_time: u64 = 0;
+    var acc: i96 = 0;
+    var fp_total_format_time: i96 = 0;
+    var fp_total_parse_time: i96 = 0;
+    var std_total_format_time: i96 = 0;
+    var std_total_parse_time: i96 = 0;
 
     const precision: ?usize = null;
 
@@ -26,31 +27,43 @@ pub fn main() !void {
 
         var zig_short_buf: [256]u8 = undefined;
 
-        timer.reset();
-        const pf_zig_short_s = fp.print(f64, &zig_short_buf, f, .{ .mode = .scientific, .precision = if (precision) |ok| ok + 1 else null });
-        fp_total_format_time += timer.lap();
+        ts = Io.Clock.awake.now(init.io);
+        const pf_zig_short_s = fp.print(f64, &zig_short_buf, f, .{
+            .mode = .scientific,
+            .precision = if (precision) |ok| ok + 1 else null,
+        });
+        fp_total_format_time += ts.untilNow(init.io, .awake).toNanoseconds();
 
-        timer.reset();
+        ts = Io.Clock.awake.now(init.io);
         const pf_zig_pf = try fp.parseFloat(f64, pf_zig_short_s);
-        fp_total_parse_time += timer.read();
+        fp_total_parse_time += ts.untilNow(init.io, .awake).toNanoseconds();
 
-        timer.reset();
-        const std_zig_short_s = try std.fmt.float.render(&zig_short_buf, f, .{ .mode = .scientific, .precision = if (precision) |ok| ok else null });
-        std_total_format_time += timer.lap();
+        ts = Io.Clock.awake.now(init.io);
+        const std_zig_short_s = try std.fmt.float.render(&zig_short_buf, f, .{
+            .mode = .scientific,
+            .precision = if (precision) |ok| ok else null,
+        });
+        std_total_format_time += ts.untilNow(init.io, .awake).toNanoseconds();
 
-        timer.reset();
+        ts = Io.Clock.awake.now(init.io);
         const std_zig_pf = try std.fmt.parseFloat(f64, std_zig_short_s);
-        std_total_parse_time += timer.read();
+        std_total_parse_time += ts.untilNow(init.io, .awake).toNanoseconds();
 
         if (false) {
             if (!std.mem.eql(u8, std_zig_short_s, pf_zig_short_s)) {
-                std.debug.print("error/fmt:   pf: {s} != std: {s}\n", .{ std_zig_short_s, pf_zig_short_s });
+                std.debug.print("error/fmt:   pf: {s} != std: {s}\n", .{
+                    std_zig_short_s,
+                    pf_zig_short_s,
+                });
                 return error.Fail;
             }
             const u_std_zig_pf: u64 = @bitCast(std_zig_pf);
             const u_pf_zig_pf: u64 = @bitCast(pf_zig_pf);
             if (u_std_zig_pf != u_pf_zig_pf) {
-                std.debug.print("error/parse: pf: {} != std: {}\n", .{ std_zig_pf, pf_zig_pf });
+                std.debug.print("error/parse: pf: {} != std: {}\n", .{
+                    std_zig_pf,
+                    pf_zig_pf,
+                });
             }
         }
 
@@ -59,7 +72,7 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        \\acc: {}
+        \\acc: 0x{x}
         \\  pf: format: {:.2}ns, parse: {:.2}ns
         \\ std: format: {:.2}ns, parse: {:.2}ns
         \\
@@ -73,7 +86,7 @@ pub fn main() !void {
 }
 
 // Returns the ns per sample
-fn tm(total_ns: u64, samples: usize) f64 {
+fn tm(total_ns: i96, samples: usize) f64 {
     const n: f64 = @floatFromInt(total_ns);
     const d: f64 = @floatFromInt(samples);
     return n / d;

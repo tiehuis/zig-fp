@@ -5,10 +5,10 @@ extern "c" fn uscalec_fixed(dst: [*]u8, f: f64, n: c_int) void;
 extern "c" fn uscalec_short(dst: [*]u8, f: f64) void;
 extern "c" fn uscalec_parse(src: [*c]const u8, len: usize) f64;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var prng = prng: {
         var seed: u64 = undefined;
-        try std.posix.getrandom(std.mem.asBytes(&seed));
+        init.io.random(@ptrCast(&seed));
         break :prng std.Random.DefaultPrng.init(seed);
     };
     const rand = prng.random();
@@ -42,17 +42,31 @@ fn checkShortC(i: usize, f: f64) !bool {
         return err;
     };
     if (zig_pf != f) {
-        std.debug.print("{} [short] zig round-trip fail: {} -> {s} -> {}\n", .{ i, f, zig_short_s, zig_pf });
+        std.debug.print("{} [short] zig round-trip fail: {} -> {s} -> {}\n", .{
+            i,
+            f,
+            zig_short_s,
+            zig_pf,
+        });
         return true;
     }
     const c_pf = uscalec_parse(&c_short_buf, c_short_len);
     if (c_pf != f) {
-        std.debug.print("{} [short]  c round-trip fail: {} -> {s} -> {}\n", .{ i, f, c_short_s, c_pf });
+        std.debug.print("{} [short]  c round-trip fail: {} -> {s} -> {}\n", .{
+            i,
+            f,
+            c_short_s,
+            c_pf,
+        });
         return true;
     }
 
     if (!std.mem.eql(u8, zig_short_s, c_short_s)) {
-        std.debug.print("{} [short] zig: {s} != c: {s}\n", .{ i, zig_short_s, c_short_s });
+        std.debug.print("{} [short] zig: {s} != c: {s}\n", .{
+            i,
+            zig_short_s,
+            c_short_s,
+        });
         return true;
     }
 
@@ -67,7 +81,11 @@ fn checkShortStd(i: usize, f: f64) !bool {
     const zigstd_short_s = try std.fmt.float.render(&zigstd_short_buf, f, .{ .mode = .scientific });
 
     if (!std.mem.eql(u8, zig_short_s, zigstd_short_s)) {
-        std.debug.print("{} [short] zig: {s} != zig-std: {s}\n", .{ i, zig_short_s, zigstd_short_s });
+        std.debug.print("{} [short] zig: {s} != zig-std: {s}\n", .{
+            i,
+            zig_short_s,
+            zigstd_short_s,
+        });
         return true;
     }
 
@@ -76,7 +94,12 @@ fn checkShortStd(i: usize, f: f64) !bool {
         return err;
     };
     if (zig_pf != f) {
-        std.debug.print("{} [short] zig round-trip fail: {} -> {s} -> {}\n", .{ i, f, zig_short_s, zig_pf });
+        std.debug.print("{} [short] zig round-trip fail: {} -> {s} -> {}\n", .{
+            i,
+            f,
+            zig_short_s,
+            zig_pf,
+        });
         return true;
     }
 
@@ -85,7 +108,10 @@ fn checkShortStd(i: usize, f: f64) !bool {
 
 fn checkFixedC(i: usize, f: f64, precision: usize) !bool {
     var zig_fixed_buf: [256]u8 = undefined;
-    const zig_fixed_s = fp.print(&zig_fixed_buf, f, .{ .mode = .scientific, .precision = precision - 1 });
+    const zig_fixed_s = fp.print(&zig_fixed_buf, f, .{
+        .mode = .scientific,
+        .precision = precision - 1,
+    });
 
     var c_fixed_buf: [256]u8 = undefined;
     uscalec_fixed(&c_fixed_buf, f, @intCast(precision));
@@ -93,7 +119,12 @@ fn checkFixedC(i: usize, f: f64, precision: usize) !bool {
     const c_fixed_s = c_fixed_buf[0..c_fixed_len];
 
     if (!std.mem.eql(u8, zig_fixed_s, c_fixed_s)) {
-        std.debug.print("{} [fixed:{}] zig: {s} != c: {s}\n", .{ i, precision, zig_fixed_s, c_fixed_s });
+        std.debug.print("{} [fixed:{}] zig: {s} != c: {s}\n", .{
+            i,
+            precision,
+            zig_fixed_s,
+            c_fixed_s,
+        });
         return true;
     }
 
@@ -102,13 +133,24 @@ fn checkFixedC(i: usize, f: f64, precision: usize) !bool {
 
 fn checkFixedStd(i: usize, f: f64, precision: ?usize) !bool {
     var zig_fixed_buf: [256]u8 = undefined;
-    const zig_fixed_s = fp.print(&zig_fixed_buf, f, .{ .mode = .scientific, .precision = precision });
+    const zig_fixed_s = fp.print(&zig_fixed_buf, f, .{
+        .mode = .scientific,
+        .precision = precision,
+    });
 
     var zigstd_fixed_buf: [256]u8 = undefined;
-    const zigstd_fixed_s = try std.fmt.float.render(&zigstd_fixed_buf, f, .{ .mode = .scientific, .precision = precision });
+    const zigstd_fixed_s = try std.fmt.float.render(&zigstd_fixed_buf, f, .{
+        .mode = .scientific,
+        .precision = precision,
+    });
 
     if (!std.mem.eql(u8, zig_fixed_s, zigstd_fixed_s)) {
-        std.debug.print("{} [fixed:{?}] zig: {s} != zig-std: {s}\n", .{ i, precision, zig_fixed_s, zigstd_fixed_s });
+        std.debug.print("{} [fixed:{?}] zig: {s} != zig-std: {s}\n", .{
+            i,
+            precision,
+            zig_fixed_s,
+            zigstd_fixed_s,
+        });
         return true;
     }
 

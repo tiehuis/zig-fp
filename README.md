@@ -95,7 +95,27 @@ $ bloaty zig-fp-size.a
    0.3%      54   0.0%       0    [AR Symbol Table]
    0.0%       8   0.0%       0    [Unmapped]
  100.0%  18.6Ki 100.0%  15.4Ki    TOTAL
-```
+
+## built with compressed tables
+$ bloaty zig-fp-size.a
+    FILE SIZE        VM SIZE    
+ --------------  -------------- 
+  42.7%  4.14Ki  64.3%  4.08Ki    .text
+  15.9%  1.55Ki  23.4%  1.48Ki    .rodata
+   9.6%     952   0.0%       0    .rela.text
+   7.7%     760   0.0%       0    .symtab
+   6.3%     624   7.6%     496    .eh_frame
+   4.8%     474   0.0%       0    .strtab
+   3.5%     352   0.0%       0    .rela.eh_frame
+   2.9%     286   3.4%     222    .rodata.str1.1
+   2.6%     254   0.0%       0    [AR Headers]
+   1.3%     128   1.0%      64    .rodata.cst16
+   1.3%     128   0.0%       0    [ELF Headers]
+   0.8%      80   0.2%      16    .rodata.cst8
+   0.5%      54   0.0%       0    [AR Symbol Table]
+   0.1%      12   0.0%       0    [Unmapped]
+ 100.0%  9.70Ki 100.0%  6.35Ki    TOTAL
+ ```
 
 ```
 $ bloaty zig-std-size.a

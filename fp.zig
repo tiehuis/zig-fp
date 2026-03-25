@@ -12,7 +12,7 @@ pub fn parseFloat(comptime F: type, s: []const u8) !F {
     const sign: f64 = if (s[0] == '-') -1.0 else 1.0;
     const i: usize = @intFromBool(s[0] == '-' or s[0] == '+');
 
-    if (s[i..].len >= 2 and s[i + 0] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
+    if (s[i..].len >= 2 and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
         const n = parseNumber(s[i + 2 ..], .{
             .base = 16,
             .max_mantissa_digits = 16,
@@ -32,10 +32,10 @@ pub fn parseFloat(comptime F: type, s: []const u8) !F {
         };
 
         // TODO: Can the main `parse` logic handle this?
-        if (n.e > pow10_max) {
+        if (n.e > f64_pow10_max) {
             @branchHint(.unlikely);
             return std.math.inf(F);
-        } else if (n.e < pow10_min) {
+        } else if (n.e < f64_pow10_min) {
             @branchHint(.unlikely);
             return 0;
         }
@@ -101,7 +101,7 @@ const Number = struct {
 
 /// Determine if 8 bytes are all decimal digits.
 /// This does not care about the order in which the bytes were loaded.
-pub fn is8Digits(v: u64) bool {
+fn is8Digits(v: u64) bool {
     const a = v +% 0x4646_4646_4646_4646;
     const b = v -% 0x3030_3030_3030_3030;
     return ((a | b) & 0x8080_8080_8080_8080) == 0;
@@ -306,7 +306,7 @@ fn parseHex(comptime F: type, m_: u64, e_: i32, excess_digits: bool) F {
     return @bitCast(bits);
 }
 
-// Returns formatted output if f is one of 0, +-nan or inf, else returns null.
+// Returns formatted output if f is one of +-0, nan or +-inf, else returns null.
 fn printSpecial(comptime F: type, s: []u8, f: F, options: PrintOptions) ?[]const u8 {
     std.debug.assert(F == f64);
     const u: u64 = @bitCast(f);
@@ -465,7 +465,7 @@ fn formatBase10(s: []u8, cu: u64) void {
 }
 
 // Returns the number of decimal digits in d.
-pub fn digits(d: u64) usize {
+fn digits(d: u64) usize {
     const nd: usize = @intCast(log10Pow2(64 - @clz(d)));
     return nd + @intFromBool(d >= pow10[nd]);
 }
@@ -702,19 +702,26 @@ fn trimZeros(cx: u64, cp: i32) struct { u64, i32 } {
 }
 
 fn pow10Scaled(e: i32) [2]u64 {
-    std.debug.assert(pow10_min <= e and e <= pow10_max);
-    if (!use_compact_pow10_tables) {
-        return pow10_table[@intCast(e - pow10_min)];
+    std.debug.assert(f64_pow10_min <= e and e <= f64_pow10_max);
+    if (comptime !use_compact_pow10_tables) {
+        return f64_pow10_table[@intCast(e - f64_pow10_min)];
     } else {
-        unreachable; // TODO: implement
+        return pow10ScaledCompact(e);
+    }
+}
+test pow10Scaled {
+    var e: i32 = f64_pow10_min;
+    while (e <= f64_pow10_max) : (e += 1) {
+        const idx: usize = @intCast(e - f64_pow10_min);
+        try std.testing.expectEqual(f64_pow10_table[idx], pow10ScaledCompact(e));
     }
 }
 
 // pow10Tab holds 128-bit mantissas of powers of 10.
 // The values are scaled so the high bit is always set.
-const pow10_min = -348;
-const pow10_max = 347;
-const pow10_table = [pow10_max - pow10_min + 1][2]u64{
+const f64_pow10_min = -348;
+const f64_pow10_max = 347;
+const f64_pow10_table = [f64_pow10_max - f64_pow10_min + 1][2]u64{
     .{ 0xfa8fd5a0081c0289, 0xe8cd3796329f1bac }, // 1e-348 * 2**1284
     .{ 0x9c99e58405118196, 0xf18042bddfa3714b }, // 1e-347 * 2**1280
     .{ 0xc3c05ee50655e1fb, 0xade0536d578c4d9e }, // 1e-346 * 2**1277
@@ -1412,6 +1419,147 @@ const pow10_table = [pow10_max - pow10_min + 1][2]u64{
     .{ 0xa7655d1d21039120, 0x9071ee70f0f1de6a }, // 1e346 * 2**-1022
     .{ 0xd13eb46469447568, 0xb48e6a0d2d2e5604 }, // 1e347 * 2**-1025
 };
+
+pub const f64_pow10_small_block_size: usize = 16;
+
+pub const f64_pow10_small10 = [_]u64{
+    0x0000000000000001, // 10^0
+    0x000000000000000a, // 10^1
+    0x0000000000000064, // 10^2
+    0x00000000000003e8, // 10^3
+    0x0000000000002710, // 10^4
+    0x00000000000186a0, // 10^5
+    0x00000000000f4240, // 10^6
+    0x0000000000989680, // 10^7
+    0x0000000005f5e100, // 10^8
+    0x000000003b9aca00, // 10^9
+    0x00000002540be400, // 10^10
+    0x000000174876e800, // 10^11
+    0x000000e8d4a51000, // 10^12
+    0x000009184e72a000, // 10^13
+    0x00005af3107a4000, // 10^14
+    0x00038d7ea4c68000, // 10^15
+};
+
+pub const f64_pow10_small_anchor = [_]struct { hi: u64, lo: u64, be: i16 }{
+    .{ .hi = 0xfa8fd5a0081c0289, .lo = 0xe8cd3796329f1bac, .be = 1284 }, // 1e-348
+    .{ .hi = 0x8b16fb203055ac77, .lo = 0xb3c434afde5033ce, .be = 1230 }, // 1e-332
+    .{ .hi = 0x9a6bb0aa55653b2e, .lo = 0xb84dcc36dedac991, .be = 1177 }, // 1e-316
+    .{ .hi = 0xab70fe17c79ac6cb, .lo = 0x92429cf5b7550bf9, .be = 1124 }, // 1e-300
+    .{ .hi = 0xbe5691ef416bd60d, .lo = 0xdc33679439a92aac, .be = 1071 }, // 1e-284
+    .{ .hi = 0xd3515c2831559a84, .lo = 0xf2a5a4bb3578c1fc, .be = 1018 }, // 1e-268
+    .{ .hi = 0xea9c227723ee8bcc, .lo = 0xb9a1ea56863e3523, .be = 965 }, // 1e-252
+    .{ .hi = 0x823c12795db6ce58, .lo = 0x893ac2f72948f7a7, .be = 911 }, // 1e-236
+    .{ .hi = 0x9096ea6f38489850, .lo = 0xc00f2d37a21089de, .be = 858 }, // 1e-220
+    .{ .hi = 0xa086cfcd97bf97f4, .lo = 0x7f175bf1332dd75b, .be = 805 }, // 1e-204
+    .{ .hi = 0xb23867fb2a35b28e, .lo = 0x16619e65b0dc55bc, .be = 752 }, // 1e-188
+    .{ .hi = 0xc5dd44271ad3cdbb, .lo = 0xbf100e1e7ac0d602, .be = 699 }, // 1e-172
+    .{ .hi = 0xdbac6c247d62a584, .lo = 0x20ba08b948b540c6, .be = 646 }, // 1e-156
+    .{ .hi = 0xf3e2f893dec3f127, .lo = 0xa576245c3c103305, .be = 593 }, // 1e-140
+    .{ .hi = 0x87625f056c7c4a8c, .lo = 0xeeb8e3289b52b68d, .be = 539 }, // 1e-124
+    .{ .hi = 0x964e858c91ba2656, .lo = 0xc595f8072aef0790, .be = 486 }, // 1e-108
+    .{ .hi = 0xa6dfbd9fb8e5b88f, .lo = 0x34b332aff09446ad, .be = 433 }, // 1e-92
+    .{ .hi = 0xb94470938fa89bcf, .lo = 0x07f71bf172a4c196, .be = 380 }, // 1e-76
+    .{ .hi = 0xcdb02555653131b7, .lo = 0xc86d0bed34f986b2, .be = 327 }, // 1e-60
+    .{ .hi = 0xe45c10c42a2b3b06, .lo = 0x734765824883af95, .be = 274 }, // 1e-44
+    .{ .hi = 0xfd87b5f28300ca0e, .lo = 0x74356291e777ac03, .be = 221 }, // 1e-28
+    .{ .hi = 0x8cbccc096f5088cc, .lo = 0x06c07848bbd1ba2c, .be = 167 }, // 1e-12
+    .{ .hi = 0x9c40000000000000, .lo = 0x0000000000000000, .be = 114 }, // 1e4
+    .{ .hi = 0xad78ebc5ac620000, .lo = 0x0000000000000000, .be = 61 }, // 1e20
+    .{ .hi = 0xc097ce7bc90715b4, .lo = 0xb460f00000000000, .be = 8 }, // 1e36
+    .{ .hi = 0xd5d238a4abe98069, .lo = 0x8d5b6fba67292780, .be = -45 }, // 1e52
+    .{ .hi = 0xed63a231d4c4fb28, .lo = 0xb35855579c11b422, .be = -98 }, // 1e68
+    .{ .hi = 0x83c7088e1aab65dc, .lo = 0x86d9983925861f05, .be = -152 }, // 1e84
+    .{ .hi = 0x924d692ca61be759, .lo = 0xa6c3d9d98fa063a9, .be = -205 }, // 1e100
+    .{ .hi = 0xa26da3999aef774a, .lo = 0x1c41a1ccf0c70f62, .be = -258 }, // 1e116
+    .{ .hi = 0xb454e4a179dd1878, .lo = 0xd64541ba673cee04, .be = -311 }, // 1e132
+    .{ .hi = 0xc83553c5c8965d3e, .lo = 0x906d7d6b6b1a5338, .be = -364 }, // 1e148
+    .{ .hi = 0xde469fbd99a05fe4, .lo = 0x9035a07126510c44, .be = -417 }, // 1e164
+    .{ .hi = 0xf6c69a72a3989f5c, .lo = 0x7552ab61a8d8c2ba, .be = -470 }, // 1e180
+    .{ .hi = 0x88fcf317f22241e3, .lo = 0xbbe0131c4207e0fc, .be = -524 }, // 1e196
+    .{ .hi = 0x98165af37b2153df, .lo = 0x3c8d85cc85748fb5, .be = -577 }, // 1e212
+    .{ .hi = 0xa8d9d1535ce3b397, .lo = 0x80e7c658be5eb2f2, .be = -630 }, // 1e228
+    .{ .hi = 0xbb764c4ca7a44410, .lo = 0x6292e52be541c80e, .be = -683 }, // 1e244
+    .{ .hi = 0xd01fef10a657842d, .lo = 0xd2d48a964fbcd27a, .be = -736 }, // 1e260
+    .{ .hi = 0xe7109bfba19c0c9e, .lo = 0xf33aed98f587c52b, .be = -789 }, // 1e276
+    .{ .hi = 0x80444b5e7aa7cf86, .lo = 0x867f2e9c30a47e4c, .be = -843 }, // 1e292
+    .{ .hi = 0x8e679c2f5e44ff90, .lo = 0xa8f0f615581589b7, .be = -896 }, // 1e308
+    .{ .hi = 0x9e19db92b4e31baa, .lo = 0x93f85d3d957cb92e, .be = -949 }, // 1e324
+    .{ .hi = 0xaf87023b9bf0ee6b, .lo = 0x1470528380797f4b, .be = -1002 }, // 1e340
+};
+
+// 2-bit correction codes
+pub const f64_pow10_small_corrections = [_]u32{
+    0xaaa95a68, 0x65555594, 0xaaa9a6a8, 0xa95569a8,
+    0xaa9aa968, 0xa6aaaa98, 0x59659954, 0x55504544,
+    0x665a5554, 0x96a5a964, 0x995aa558, 0xa959a964,
+    0x55569954, 0xa9aa5a58, 0x5996a6a8, 0x5aaaaaa8,
+    0xaa9aaa68, 0xaaaa6aa8, 0x65965568, 0xaaa9aaa8,
+    0x696aa964, 0x55aaaa68, 0xaaaaaaa8, 0xaaaaaaa8,
+    0xaaaaaaa8, 0xaaaaaaa8, 0x96655998, 0x15554544,
+    0x966565a8, 0x9aaaa6a8, 0x96966968, 0x66956558,
+    0x65a99564, 0x6a965658, 0x04555584, 0x95545544,
+    0xaa5559a4, 0xaa666a54, 0x65555458, 0xaaaaaa68,
+    0x15555504, 0x5a695554, 0x55655554, 0x00005694,
+};
+
+// Compute pow10_tab value using a smaller table. This is done by storing only the exact value of
+// every 16-entries and computing intermediate values via multiplication by a power of 10 followed
+// by a bit-shift. Minor correction is then applied where needed to handle rounding errors.
+fn pow10ScaledCompact(e: i32) [2]u64 {
+    std.debug.assert(f64_pow10_min <= e and e <= f64_pow10_max);
+
+    const i: usize = @intCast(e - f64_pow10_min);
+    const base = i / f64_pow10_small_block_size;
+    const off = i % f64_pow10_small_block_size;
+
+    const a = f64_pow10_small_anchor[base];
+    if (off == 0) return .{ a.hi, a.lo };
+
+    // compute value from base offset
+    const anchor_m: u128 = (@as(u128, a.hi) << 64) - @as(u128, a.lo);
+    const prod: u256 = @as(u256, anchor_m) * @as(u256, f64_pow10_small10[off]);
+    const shift: u8 = @intCast((256 - @clz(prod)) - 128);
+
+    // scale 256-bit down to 128-bit, rounding up
+    var m: u128 = if (shift == 0)
+        @truncate(prod)
+    else blk: {
+        const add = (@as(u256, 1) << @intCast(shift)) - 1;
+        break :blk @truncate((prod + add) >> @intCast(shift));
+    };
+
+    var be: i32 = a.be - @as(i32, @intCast(shift));
+
+    // compute and apply correct offset if needed
+    const corr_word = f64_pow10_small_corrections[i / 16];
+    const corr_shift: u5 = @intCast((i % 16) * 2);
+    const code: i8 = @intCast((corr_word >> corr_shift) & 0x3);
+    const adj = code - 2; // map [0..4) -> [-2..2)
+
+    if (adj != 0) {
+        if (adj > 0) {
+            m +%= @as(u128, @intCast(adj));
+        } else {
+            m -%= @as(u128, @intCast(-adj));
+        }
+
+        // normalize so top-bit is always set
+        std.debug.assert(m != 0);
+        const lz: u7 = @intCast(@clz(m));
+        m <<= lz;
+        be += @as(i32, lz);
+    }
+
+    // encode in expected format
+    var hi: u64 = @truncate(m >> 64);
+    var lo: u64 = @truncate(m);
+    if (lo != 0) {
+        hi +%= 1;
+        lo = 0 -% lo;
+    }
+    return .{ hi, lo };
+}
 
 const builtin = @import("builtin");
 

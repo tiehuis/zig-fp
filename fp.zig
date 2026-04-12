@@ -1,15 +1,16 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
-const use_zig_std_exponent_form = true;
-const use_fast_trim_zeros = false;
-const use_compact_pow10_tables = false;
+/// Any buffer used for `format` must be at least this large. This is asserted. A runtime check will
+/// additionally be performed if more bytes are required.
+pub const min_buffer_size = 53;
 
 /// Parse a float from a string, returning the requested type.
 /// Returns an error if the input is malformed.
-pub fn parseFloat(comptime F: type, s: []const u8) !F {
+pub fn parse(comptime F: type, s: []const u8) !F {
     std.debug.assert(F == f64);
     if (s.len == 0) return error.InvalidCharacter;
-    const sign: f64 = if (s[0] == '-') -1.0 else 1.0;
+    const sign: F = if (s[0] == '-') -1.0 else 1.0;
     const i: usize = @intFromBool(s[0] == '-' or s[0] == '+');
 
     if (s[i..].len >= 2 and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
@@ -40,19 +41,31 @@ pub fn parseFloat(comptime F: type, s: []const u8) !F {
             return 0;
         }
 
-        return sign * parse(n.m, n.e);
+        return sign * parseU(n.m, n.e);
     }
 }
 
-pub const PrintOptions = struct {
+pub const Mode = enum {
+    scientific,
+    decimal,
+    hex,
+};
+
+pub const Case = enum {
+    upper,
+    lower,
+};
+
+pub const Options = struct {
     precision: ?usize = null,
-    mode: enum { scientific, decimal, hex } = .scientific,
+    mode: Mode = .scientific,
+    case: Case = .lower,
 };
 
 /// Print a float to a user-supplied buffer.
-/// TODO: Assumes the provided buffer is sufficiently large.
-pub fn print(comptime F: type, s: []u8, f: F, options: PrintOptions) []const u8 {
-    if (printSpecial(F, s, f, options)) |r| return r;
+pub fn format(comptime F: type, s: []u8, f: F, options: Options) ![]const u8 {
+    std.debug.assert(s.len >= min_buffer_size);
+    if (formatSpecial(F, s, f, options)) |r| return r;
 
     const len = blk: {
         if (false and options.mode == .hex) {
@@ -61,8 +74,8 @@ pub fn print(comptime F: type, s: []u8, f: F, options: PrintOptions) []const u8 
             const m, const e = if (options.precision) |prec| fixed(f, @intCast(prec + 1)) else short(f);
             const d = digits(m);
             break :blk switch (options.mode) {
-                .scientific => formatScientific(s[1..], m, e, d),
-                .decimal => formatDecimal(s[1..], m, e, d),
+                .scientific => try formatScientific(s[1..], m, e, d),
+                .decimal => try formatDecimal(s[1..], m, e, d),
                 .hex => unreachable,
             };
         }
@@ -76,7 +89,7 @@ pub fn print(comptime F: type, s: []u8, f: F, options: PrintOptions) []const u8 
     }
 }
 
-fn formatHex(s: []u8, f: f64, options: PrintOptions) usize {
+fn formatHex(s: []u8, f: f64, options: Options) usize {
     _ = s;
     _ = f;
     _ = options;
@@ -164,7 +177,7 @@ fn parseDigitsBounded(s: []const u8, acc: *u64, base: u8, bound: usize) usize {
     const hi: u8 = if (base == 10) '9' else 'f';
 
     var i: usize = 0;
-    while (acc.* < bound) : (i += 1) {
+    while (i < s.len and acc.* < bound) : (i += 1) {
         if (!(lo <= s[i] and s[i] <= hi)) break;
         acc.* = acc.* *% base +% (s[i] - '0');
     }
@@ -177,7 +190,7 @@ const FormatInfo = struct {
     exp_char_lower: u8,
 };
 
-fn parseNumber(s: []const u8, info: FormatInfo) ?Number {
+fn parseNumber(s: []const u8, comptime info: FormatInfo) ?Number {
     std.debug.assert(info.base == 10 or info.base == 16);
     var n: Number = .{};
     var i: usize = 0;
@@ -248,7 +261,6 @@ fn parseNumber(s: []const u8, info: FormatInfo) ?Number {
 }
 
 fn parseHex(comptime F: type, m_: u64, e_: i32, excess_digits: bool) F {
-    std.debug.assert(F == f64);
     var m = m_;
     var e = e_;
 
@@ -307,8 +319,7 @@ fn parseHex(comptime F: type, m_: u64, e_: i32, excess_digits: bool) F {
 }
 
 // Returns formatted output if f is one of +-0, nan or +-inf, else returns null.
-fn printSpecial(comptime F: type, s: []u8, f: F, options: PrintOptions) ?[]const u8 {
-    std.debug.assert(F == f64);
+fn formatSpecial(comptime F: type, s: []u8, f: F, options: Options) ?[]const u8 {
     const u: u64 = @bitCast(f);
     const abs_u = u & ((1 << 63) - 1);
     const inf_min = ((1 << 11) - 1) << 52;
@@ -325,16 +336,16 @@ fn printSpecial(comptime F: type, s: []u8, f: F, options: PrintOptions) ?[]const
         @memcpy(s[n..][0..3], "inf");
         n += 3;
     } else {
-        @memcpy(s[0..3], "nan");
-        n = 3;
+        @memcpy(s[n..][0..3], "nan");
+        n += 3;
     }
 
     return s[0..n];
 }
 
-fn formatScientific(s: []u8, d: u64, cp: i32, nd: usize) usize {
+fn formatScientific(s: []u8, d: u64, cp: i32, nd: usize) !usize {
     formatBase10(s[1 .. nd + 1], d);
-    var p = cp + @as(i32, @intCast(nd - 1));
+    const p = cp + @as(i32, @intCast(nd - 1));
 
     s[0] = s[1];
     var n: usize = @intCast(nd);
@@ -342,67 +353,76 @@ fn formatScientific(s: []u8, d: u64, cp: i32, nd: usize) usize {
         s[1] = '.';
         n += 1;
     }
+    if (n + 5 > s.len) return error.BufferTooSmall;
 
-    if (use_zig_std_exponent_form) {
+    if (!build_options.use_legacy_exponent_form) {
         s[n] = 'e';
-        if (p < 0) {
-            n += 1;
-            s[n] = '-';
-            p = -p;
-        }
-        const up: usize = @intCast(p);
+        n += 1;
+        s[n] = '-';
+        n += @intFromBool(p < 0);
+        const up: usize = @abs(p);
         if (up < 10) {
-            s[n + 1] = @intCast('0' + up);
-            return n + 2;
+            s[n] = @intCast('0' + up);
+            n += 1;
+        } else if (up < 100) {
+            s[n] = digits2[2 * up];
+            s[n + 1] = digits2[2 * up + 1];
+            n += 2;
+        } else {
+            std.debug.assert(up < 1000);
+            const q = up / 100;
+            const r = up % 100;
+            s[n] = @intCast('0' + q);
+            s[n + 1] = digits2[2 * r];
+            s[n + 2] = digits2[2 * r + 1];
+            n += 3;
         }
-        if (up < 100) {
-            s[n + 1] = digits2[(up * 2)];
-            s[n + 2] = digits2[(up * 2 + 1)];
-            return n + 3;
-        }
-        s[n + 1] = @intCast('0' + up / 100);
-        s[n + 2] = digits2[(up % 100) * 2];
-        s[n + 3] = digits2[(up % 100) * 2 + 1];
-        return n + 4;
     } else {
         s[n] = 'e';
-        if (p < 0) {
-            s[n + 1] = '-';
-            p = -p;
-        } else {
-            s[n + 1] = '+';
-        }
-        const up: usize = @intCast(p);
+        s[n + 1] = if (p < 0) '-' else '+';
+        n += 2;
+        const up: usize = @abs(p);
         if (up < 100) {
-            s[n + 2] = digits2[(up * 2)];
-            s[n + 3] = digits2[(up * 2 + 1)];
-            return n + 4;
+            s[n] = digits2[2 * up];
+            s[n + 1] = digits2[2 * up + 1];
+            n += 2;
+        } else {
+            std.debug.assert(up < 1000);
+            const q = up / 100;
+            const r = up % 100;
+            s[n] = @intCast('0' + q);
+            s[n + 1] = digits2[2 * r];
+            s[n + 2] = digits2[2 * r + 1];
+            n += 3;
         }
-        s[n + 2] = @intCast('0' + up / 100);
-        s[n + 3] = digits2[(up % 100) * 2];
-        s[n + 4] = digits2[(up % 100) * 2 + 1];
-        return n + 5;
     }
+
+    return n;
 }
 
-fn formatDecimal(s: []u8, d: u64, p: i32, nd: usize) usize {
+fn formatDecimal(s: []u8, d: u64, p: i32, nd: usize) !usize {
     var n: usize = 0;
     const w = p + @as(i32, @intCast(nd));
-    std.debug.assert(w >= 0);
     const uw: usize = @abs(w);
-    if (w <= 0) {
+    if (w <= 0) { // 0.xxx
+        if (nd + uw + 2 > s.len) return error.BufferTooSmall;
         s[0] = '0';
         s[1] = '.';
         n += 2;
         @memset(s[n..][0..uw], '0');
         n += uw;
         formatBase10(s[n..][0..nd], d);
-        return n + d;
-    } else {
+        return nd + n;
+    } else if (uw < nd) { // xxx.xxx
+        if (nd + 1 > s.len) return error.BufferTooSmall;
         formatBase10(s[1 .. nd + 1], d);
         @memmove(s[0..uw], s[1 .. uw + 1]);
         s[uw] = '.';
         return nd + 1;
+    } else { // xxx000
+        formatBase10(s[0..nd], d);
+        @memset(s[nd..uw], '0');
+        return uw;
     }
 }
 
@@ -470,7 +490,7 @@ fn digits(d: u64) usize {
     return nd + @intFromBool(d >= pow10[nd]);
 }
 
-fn parse(d: u64, p: i32) f64 {
+fn parseU(d: u64, p: i32) f64 {
     std.debug.assert(d <= 1e19);
     const b: i32 = 64 - @clz(d);
     const lp: i32 = log2Pow10(p);
@@ -636,7 +656,7 @@ fn trimZeros(cx: u64, cp: i32) struct { u64, i32 } {
     var x = cx;
     var p = cp;
 
-    if (use_fast_trim_zeros) {
+    if (build_options.use_fast_trim_zeros) {
         const max_u64 = std.math.maxInt(u64);
         const inv5p8 = 0xc767074b22e90e21; // inverse of 5**8
         const inv5p4 = 0xd288ce703afb7e91; // inverse of 5**4
@@ -703,7 +723,7 @@ fn trimZeros(cx: u64, cp: i32) struct { u64, i32 } {
 
 fn pow10Scaled(e: i32) [2]u64 {
     std.debug.assert(f64_pow10_min <= e and e <= f64_pow10_max);
-    if (comptime !use_compact_pow10_tables) {
+    if (!build_options.use_compact_tables) {
         return f64_pow10_table[@intCast(e - f64_pow10_min)];
     } else {
         return pow10ScaledCompact(e);
@@ -735,7 +755,6 @@ fn pow10ScaledCompact(e: i32) [2]u64 {
         const add = (@as(u256, 1) << @intCast(shift)) - 1;
         break :blk @truncate((prod + add) >> @intCast(shift));
     };
-    var be: i32 = a.be - @as(i32, @intCast(shift));
 
     // compute and apply correct offset if needed
     const corr_word = f64_pow10_small_corrections[i / 16];
@@ -749,7 +768,6 @@ fn pow10ScaledCompact(e: i32) [2]u64 {
         std.debug.assert(m != 0);
         const lz: u7 = @intCast(@clz(m));
         m <<= lz;
-        be += @as(i32, lz);
     }
 
     // encode in expected format
@@ -774,51 +792,51 @@ comptime {
     std.debug.assert(f64_pow10_small_block_size < pow10.len);
 }
 
-pub const f64_pow10_small_anchor = [_]struct { hi: u64, lo: u64, be: i16 }{
-    .{ .hi = 0xfa8fd5a0081c0289, .lo = 0xe8cd3796329f1bac, .be = 1284 }, // 1e-348
-    .{ .hi = 0x8b16fb203055ac77, .lo = 0xb3c434afde5033ce, .be = 1230 }, // 1e-332
-    .{ .hi = 0x9a6bb0aa55653b2e, .lo = 0xb84dcc36dedac991, .be = 1177 }, // 1e-316
-    .{ .hi = 0xab70fe17c79ac6cb, .lo = 0x92429cf5b7550bf9, .be = 1124 }, // 1e-300
-    .{ .hi = 0xbe5691ef416bd60d, .lo = 0xdc33679439a92aac, .be = 1071 }, // 1e-284
-    .{ .hi = 0xd3515c2831559a84, .lo = 0xf2a5a4bb3578c1fc, .be = 1018 }, // 1e-268
-    .{ .hi = 0xea9c227723ee8bcc, .lo = 0xb9a1ea56863e3523, .be = 965 }, // 1e-252
-    .{ .hi = 0x823c12795db6ce58, .lo = 0x893ac2f72948f7a7, .be = 911 }, // 1e-236
-    .{ .hi = 0x9096ea6f38489850, .lo = 0xc00f2d37a21089de, .be = 858 }, // 1e-220
-    .{ .hi = 0xa086cfcd97bf97f4, .lo = 0x7f175bf1332dd75b, .be = 805 }, // 1e-204
-    .{ .hi = 0xb23867fb2a35b28e, .lo = 0x16619e65b0dc55bc, .be = 752 }, // 1e-188
-    .{ .hi = 0xc5dd44271ad3cdbb, .lo = 0xbf100e1e7ac0d602, .be = 699 }, // 1e-172
-    .{ .hi = 0xdbac6c247d62a584, .lo = 0x20ba08b948b540c6, .be = 646 }, // 1e-156
-    .{ .hi = 0xf3e2f893dec3f127, .lo = 0xa576245c3c103305, .be = 593 }, // 1e-140
-    .{ .hi = 0x87625f056c7c4a8c, .lo = 0xeeb8e3289b52b68d, .be = 539 }, // 1e-124
-    .{ .hi = 0x964e858c91ba2656, .lo = 0xc595f8072aef0790, .be = 486 }, // 1e-108
-    .{ .hi = 0xa6dfbd9fb8e5b88f, .lo = 0x34b332aff09446ad, .be = 433 }, // 1e-92
-    .{ .hi = 0xb94470938fa89bcf, .lo = 0x07f71bf172a4c196, .be = 380 }, // 1e-76
-    .{ .hi = 0xcdb02555653131b7, .lo = 0xc86d0bed34f986b2, .be = 327 }, // 1e-60
-    .{ .hi = 0xe45c10c42a2b3b06, .lo = 0x734765824883af95, .be = 274 }, // 1e-44
-    .{ .hi = 0xfd87b5f28300ca0e, .lo = 0x74356291e777ac03, .be = 221 }, // 1e-28
-    .{ .hi = 0x8cbccc096f5088cc, .lo = 0x06c07848bbd1ba2c, .be = 167 }, // 1e-12
-    .{ .hi = 0x9c40000000000000, .lo = 0x0000000000000000, .be = 114 }, // 1e4
-    .{ .hi = 0xad78ebc5ac620000, .lo = 0x0000000000000000, .be = 61 }, // 1e20
-    .{ .hi = 0xc097ce7bc90715b4, .lo = 0xb460f00000000000, .be = 8 }, // 1e36
-    .{ .hi = 0xd5d238a4abe98069, .lo = 0x8d5b6fba67292780, .be = -45 }, // 1e52
-    .{ .hi = 0xed63a231d4c4fb28, .lo = 0xb35855579c11b422, .be = -98 }, // 1e68
-    .{ .hi = 0x83c7088e1aab65dc, .lo = 0x86d9983925861f05, .be = -152 }, // 1e84
-    .{ .hi = 0x924d692ca61be759, .lo = 0xa6c3d9d98fa063a9, .be = -205 }, // 1e100
-    .{ .hi = 0xa26da3999aef774a, .lo = 0x1c41a1ccf0c70f62, .be = -258 }, // 1e116
-    .{ .hi = 0xb454e4a179dd1878, .lo = 0xd64541ba673cee04, .be = -311 }, // 1e132
-    .{ .hi = 0xc83553c5c8965d3e, .lo = 0x906d7d6b6b1a5338, .be = -364 }, // 1e148
-    .{ .hi = 0xde469fbd99a05fe4, .lo = 0x9035a07126510c44, .be = -417 }, // 1e164
-    .{ .hi = 0xf6c69a72a3989f5c, .lo = 0x7552ab61a8d8c2ba, .be = -470 }, // 1e180
-    .{ .hi = 0x88fcf317f22241e3, .lo = 0xbbe0131c4207e0fc, .be = -524 }, // 1e196
-    .{ .hi = 0x98165af37b2153df, .lo = 0x3c8d85cc85748fb5, .be = -577 }, // 1e212
-    .{ .hi = 0xa8d9d1535ce3b397, .lo = 0x80e7c658be5eb2f2, .be = -630 }, // 1e228
-    .{ .hi = 0xbb764c4ca7a44410, .lo = 0x6292e52be541c80e, .be = -683 }, // 1e244
-    .{ .hi = 0xd01fef10a657842d, .lo = 0xd2d48a964fbcd27a, .be = -736 }, // 1e260
-    .{ .hi = 0xe7109bfba19c0c9e, .lo = 0xf33aed98f587c52b, .be = -789 }, // 1e276
-    .{ .hi = 0x80444b5e7aa7cf86, .lo = 0x867f2e9c30a47e4c, .be = -843 }, // 1e292
-    .{ .hi = 0x8e679c2f5e44ff90, .lo = 0xa8f0f615581589b7, .be = -896 }, // 1e308
-    .{ .hi = 0x9e19db92b4e31baa, .lo = 0x93f85d3d957cb92e, .be = -949 }, // 1e324
-    .{ .hi = 0xaf87023b9bf0ee6b, .lo = 0x1470528380797f4b, .be = -1002 }, // 1e340
+pub const f64_pow10_small_anchor = [_]struct { hi: u64, lo: u64 }{
+    .{ .hi = 0xfa8fd5a0081c0289, .lo = 0xe8cd3796329f1bac }, // 1e-348
+    .{ .hi = 0x8b16fb203055ac77, .lo = 0xb3c434afde5033ce }, // 1e-332
+    .{ .hi = 0x9a6bb0aa55653b2e, .lo = 0xb84dcc36dedac991 }, // 1e-316
+    .{ .hi = 0xab70fe17c79ac6cb, .lo = 0x92429cf5b7550bf9 }, // 1e-300
+    .{ .hi = 0xbe5691ef416bd60d, .lo = 0xdc33679439a92aac }, // 1e-284
+    .{ .hi = 0xd3515c2831559a84, .lo = 0xf2a5a4bb3578c1fc }, // 1e-268
+    .{ .hi = 0xea9c227723ee8bcc, .lo = 0xb9a1ea56863e3523 }, // 1e-252
+    .{ .hi = 0x823c12795db6ce58, .lo = 0x893ac2f72948f7a7 }, // 1e-236
+    .{ .hi = 0x9096ea6f38489850, .lo = 0xc00f2d37a21089de }, // 1e-220
+    .{ .hi = 0xa086cfcd97bf97f4, .lo = 0x7f175bf1332dd75b }, // 1e-204
+    .{ .hi = 0xb23867fb2a35b28e, .lo = 0x16619e65b0dc55bc }, // 1e-188
+    .{ .hi = 0xc5dd44271ad3cdbb, .lo = 0xbf100e1e7ac0d602 }, // 1e-172
+    .{ .hi = 0xdbac6c247d62a584, .lo = 0x20ba08b948b540c6 }, // 1e-156
+    .{ .hi = 0xf3e2f893dec3f127, .lo = 0xa576245c3c103305 }, // 1e-140
+    .{ .hi = 0x87625f056c7c4a8c, .lo = 0xeeb8e3289b52b68d }, // 1e-124
+    .{ .hi = 0x964e858c91ba2656, .lo = 0xc595f8072aef0790 }, // 1e-108
+    .{ .hi = 0xa6dfbd9fb8e5b88f, .lo = 0x34b332aff09446ad }, // 1e-92
+    .{ .hi = 0xb94470938fa89bcf, .lo = 0x07f71bf172a4c196 }, // 1e-76
+    .{ .hi = 0xcdb02555653131b7, .lo = 0xc86d0bed34f986b2 }, // 1e-60
+    .{ .hi = 0xe45c10c42a2b3b06, .lo = 0x734765824883af95 }, // 1e-44
+    .{ .hi = 0xfd87b5f28300ca0e, .lo = 0x74356291e777ac03 }, // 1e-28
+    .{ .hi = 0x8cbccc096f5088cc, .lo = 0x06c07848bbd1ba2c }, // 1e-12
+    .{ .hi = 0x9c40000000000000, .lo = 0x0000000000000000 }, // 1e4
+    .{ .hi = 0xad78ebc5ac620000, .lo = 0x0000000000000000 }, // 1e20
+    .{ .hi = 0xc097ce7bc90715b4, .lo = 0xb460f00000000000 }, // 1e36
+    .{ .hi = 0xd5d238a4abe98069, .lo = 0x8d5b6fba67292780 }, // 1e52
+    .{ .hi = 0xed63a231d4c4fb28, .lo = 0xb35855579c11b422 }, // 1e68
+    .{ .hi = 0x83c7088e1aab65dc, .lo = 0x86d9983925861f05 }, // 1e84
+    .{ .hi = 0x924d692ca61be759, .lo = 0xa6c3d9d98fa063a9 }, // 1e100
+    .{ .hi = 0xa26da3999aef774a, .lo = 0x1c41a1ccf0c70f62 }, // 1e116
+    .{ .hi = 0xb454e4a179dd1878, .lo = 0xd64541ba673cee04 }, // 1e132
+    .{ .hi = 0xc83553c5c8965d3e, .lo = 0x906d7d6b6b1a5338 }, // 1e148
+    .{ .hi = 0xde469fbd99a05fe4, .lo = 0x9035a07126510c44 }, // 1e164
+    .{ .hi = 0xf6c69a72a3989f5c, .lo = 0x7552ab61a8d8c2ba }, // 1e180
+    .{ .hi = 0x88fcf317f22241e3, .lo = 0xbbe0131c4207e0fc }, // 1e196
+    .{ .hi = 0x98165af37b2153df, .lo = 0x3c8d85cc85748fb5 }, // 1e212
+    .{ .hi = 0xa8d9d1535ce3b397, .lo = 0x80e7c658be5eb2f2 }, // 1e228
+    .{ .hi = 0xbb764c4ca7a44410, .lo = 0x6292e52be541c80e }, // 1e244
+    .{ .hi = 0xd01fef10a657842d, .lo = 0xd2d48a964fbcd27a }, // 1e260
+    .{ .hi = 0xe7109bfba19c0c9e, .lo = 0xf33aed98f587c52b }, // 1e276
+    .{ .hi = 0x80444b5e7aa7cf86, .lo = 0x867f2e9c30a47e4c }, // 1e292
+    .{ .hi = 0x8e679c2f5e44ff90, .lo = 0xa8f0f615581589b7 }, // 1e308
+    .{ .hi = 0x9e19db92b4e31baa, .lo = 0x93f85d3d957cb92e }, // 1e324
+    .{ .hi = 0xaf87023b9bf0ee6b, .lo = 0x1470528380797f4b }, // 1e340
 };
 
 // 2-bit correction codes
@@ -1546,12 +1564,12 @@ fn check(comptime T: type, value: T, comptime expected: []const u8) !void {
 
     var buf: [6000]u8 = undefined;
     const value_bits: I = @bitCast(value);
-    const s = print(T, &buf, value, .{});
+    const s = try format(T, &buf, value, .{});
     try std.testing.expectEqualStrings(expected, s);
 
     if (T == f80 and builtin.target.os.tag == .windows and builtin.target.cpu.arch == .x86_64) return;
 
-    const o = try parseFloat(T, s);
+    const o = try parse(T, s);
     const o_bits: I = @bitCast(o);
 
     if (std.math.isNan(value)) {
@@ -1618,59 +1636,59 @@ const math = std.math;
 const approxEqAbs = math.approxEqAbs;
 const epsilon = 1e-7;
 
-test "parseFloat" {
+test parse {
     inline for ([_]type{f64}) |T| {
-        try testing.expectError(error.InvalidCharacter, parseFloat(T, ""));
-        try testing.expectError(error.InvalidCharacter, parseFloat(T, "   1"));
-        try testing.expectError(error.InvalidCharacter, parseFloat(T, "1abc"));
-        try testing.expectError(error.InvalidCharacter, parseFloat(T, "+"));
-        try testing.expectError(error.InvalidCharacter, parseFloat(T, "-"));
+        try testing.expectError(error.InvalidCharacter, parse(T, ""));
+        try testing.expectError(error.InvalidCharacter, parse(T, "   1"));
+        try testing.expectError(error.InvalidCharacter, parse(T, "1abc"));
+        try testing.expectError(error.InvalidCharacter, parse(T, "+"));
+        try testing.expectError(error.InvalidCharacter, parse(T, "-"));
 
-        try expectEqual(try parseFloat(T, "0"), 0.0);
-        try expectEqual(try parseFloat(T, "0"), 0.0);
-        try expectEqual(try parseFloat(T, "+0"), 0.0);
-        try expectEqual(try parseFloat(T, "-0"), 0.0);
+        try expectEqual(try parse(T, "0"), 0.0);
+        try expectEqual(try parse(T, "0"), 0.0);
+        try expectEqual(try parse(T, "+0"), 0.0);
+        try expectEqual(try parse(T, "-0"), 0.0);
 
-        try expectEqual(try parseFloat(T, "0e0"), 0);
-        try expectEqual(try parseFloat(T, "2e3"), 2000.0);
-        try expectEqual(try parseFloat(T, "1e0"), 1.0);
-        try expectEqual(try parseFloat(T, "-2e3"), -2000.0);
-        try expectEqual(try parseFloat(T, "-1e0"), -1.0);
-        try expectEqual(try parseFloat(T, "1.234e3"), 1234);
+        try expectEqual(try parse(T, "0e0"), 0);
+        try expectEqual(try parse(T, "2e3"), 2000.0);
+        try expectEqual(try parse(T, "1e0"), 1.0);
+        try expectEqual(try parse(T, "-2e3"), -2000.0);
+        try expectEqual(try parse(T, "-1e0"), -1.0);
+        try expectEqual(try parse(T, "1.234e3"), 1234);
 
-        try expect(approxEqAbs(T, try parseFloat(T, "3.141"), 3.141, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, "-3.141"), -3.141, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "3.141"), 3.141, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "-3.141"), -3.141, epsilon));
 
-        try expectEqual(try parseFloat(T, "1e-5000"), 0);
-        try expectEqual(try parseFloat(T, "1e+5000"), std.math.inf(T));
+        try expectEqual(try parse(T, "1e-5000"), 0);
+        try expectEqual(try parse(T, "1e+5000"), std.math.inf(T));
 
-        try expectEqual(try parseFloat(T, "0.4e0066999999999999999999999999999999999999999999999999999"), std.math.inf(T));
-        //try expect(approxEqAbs(T, try parseFloat(T, "0_1_2_3_4_5_6.7_8_9_0_0_0e0_0_1_0"), @as(T, 123456.789000e10), epsilon)); // TODO
+        try expectEqual(try parse(T, "0.4e0066999999999999999999999999999999999999999999999999999"), std.math.inf(T));
+        //try expect(approxEqAbs(T, try parse(T, "0_1_2_3_4_5_6.7_8_9_0_0_0e0_0_1_0"), @as(T, 123456.789000e10), epsilon)); // TODO
 
         // underscore rule is simple and reduces to "can only occur between two digits" and multiple are not supported.
-        try expectError(error.InvalidCharacter, parseFloat(T, "0123456.789000e_0010")); // cannot occur immediately after exponent
-        try expectError(error.InvalidCharacter, parseFloat(T, "_0123456.789000e0010")); // cannot occur before any digits
-        try expectError(error.InvalidCharacter, parseFloat(T, "0__123456.789000e_0010")); // cannot occur twice in a row
-        try expectError(error.InvalidCharacter, parseFloat(T, "0123456_.789000e0010")); // cannot occur before decimal point
-        try expectError(error.InvalidCharacter, parseFloat(T, "0123456.789000e0010_")); // cannot occur at end of number
+        try expectError(error.InvalidCharacter, parse(T, "0123456.789000e_0010")); // cannot occur immediately after exponent
+        try expectError(error.InvalidCharacter, parse(T, "_0123456.789000e0010")); // cannot occur before any digits
+        try expectError(error.InvalidCharacter, parse(T, "0__123456.789000e_0010")); // cannot occur twice in a row
+        try expectError(error.InvalidCharacter, parse(T, "0123456_.789000e0010")); // cannot occur before decimal point
+        try expectError(error.InvalidCharacter, parse(T, "0123456.789000e0010_")); // cannot occur at end of number
 
-        try expect(approxEqAbs(T, try parseFloat(T, "1e-2"), 0.01, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, "1234e-2"), 12.34, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "1e-2"), 0.01, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "1234e-2"), 12.34, epsilon));
 
-        try expect(approxEqAbs(T, try parseFloat(T, "1."), 1, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, "0."), 0, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, ".1"), 0.1, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, ".0"), 0, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, ".1e-1"), 0.01, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "1."), 1, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "0."), 0, epsilon));
+        try expect(approxEqAbs(T, try parse(T, ".1"), 0.1, epsilon));
+        try expect(approxEqAbs(T, try parse(T, ".0"), 0, epsilon));
+        try expect(approxEqAbs(T, try parse(T, ".1e-1"), 0.01, epsilon));
 
-        try expectError(error.InvalidCharacter, parseFloat(T, ".")); // At least one digit is required.
-        try expectError(error.InvalidCharacter, parseFloat(T, ".e1")); // At least one digit is required.
-        try expectError(error.InvalidCharacter, parseFloat(T, "0.e")); // At least one digit is required.
+        try expectError(error.InvalidCharacter, parse(T, ".")); // At least one digit is required.
+        try expectError(error.InvalidCharacter, parse(T, ".e1")); // At least one digit is required.
+        try expectError(error.InvalidCharacter, parse(T, "0.e")); // At least one digit is required.
 
-        try expect(approxEqAbs(T, try parseFloat(T, "123142.1"), 123142.1, epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, "-123142.1124"), @as(T, -123142.1124), epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, "0.7062146892655368"), @as(T, 0.7062146892655368), epsilon));
-        try expect(approxEqAbs(T, try parseFloat(T, "2.71828182845904523536"), @as(T, 2.718281828459045), epsilon));
+        try expect(approxEqAbs(T, try parse(T, "123142.1"), 123142.1, epsilon));
+        try expect(approxEqAbs(T, try parse(T, "-123142.1124"), @as(T, -123142.1124), epsilon));
+        try expect(approxEqAbs(T, try parse(T, "0.7062146892655368"), @as(T, 0.7062146892655368), epsilon));
+        try expect(approxEqAbs(T, try parse(T, "2.71828182845904523536"), @as(T, 2.718281828459045), epsilon));
     }
 }
 
@@ -1678,129 +1696,129 @@ test "nan and inf" {
     inline for ([_]type{f64}) |T| {
         const Z = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
 
-        try expectEqual(@as(Z, @bitCast(try parseFloat(T, "nAn"))), @as(Z, @bitCast(std.math.nan(T))));
-        try expectEqual(try parseFloat(T, "inF"), std.math.inf(T));
-        try expectEqual(try parseFloat(T, "-INF"), -std.math.inf(T));
+        try expectEqual(@as(Z, @bitCast(try parse(T, "nAn"))), @as(Z, @bitCast(std.math.nan(T))));
+        try expectEqual(try parse(T, "inF"), std.math.inf(T));
+        try expectEqual(try parse(T, "-INF"), -std.math.inf(T));
     }
 }
 
 test "largest normals" {
-    //try expectEqual(@as(u16, @bitCast(try parseFloat(f16, "65504"))), 0x7bff);
-    //try expectEqual(@as(u32, @bitCast(try parseFloat(f32, "3.4028234664E38"))), 0x7f7f_ffff);
-    try expectEqual(@as(u64, @bitCast(try parseFloat(f64, "1.7976931348623157E308"))), 0x7fef_ffff_ffff_ffff);
-    //try expectEqual(@as(u80, @bitCast(try parseFloat(f80, "1.189731495357231765E4932"))), 0x7ffe_ffff_ffff_ffff_ffff);
-    //try expectEqual(@as(u128, @bitCast(try parseFloat(f128, "1.1897314953572317650857593266280070162E4932"))), 0x7ffe_ffff_ffff_ffff_ffff_ffff_ffff_ffff);
+    //try expectEqual(@as(u16, @bitCast(try parse(f16, "65504"))), 0x7bff);
+    //try expectEqual(@as(u32, @bitCast(try parse(f32, "3.4028234664E38"))), 0x7f7f_ffff);
+    try expectEqual(@as(u64, @bitCast(try parse(f64, "1.7976931348623157E308"))), 0x7fef_ffff_ffff_ffff);
+    //try expectEqual(@as(u80, @bitCast(try parse(f80, "1.189731495357231765E4932"))), 0x7ffe_ffff_ffff_ffff_ffff);
+    //try expectEqual(@as(u128, @bitCast(try parse(f128, "1.1897314953572317650857593266280070162E4932"))), 0x7ffe_ffff_ffff_ffff_ffff_ffff_ffff_ffff);
 }
 
 //test "#11169" {
-//    try expectEqual(try parseFloat(f128, "9007199254740993.0"), 9007199254740993.0);
+//    try expectEqual(try parse(f128, "9007199254740993.0"), 9007199254740993.0);
 //}
 
 //test "many_digits hex" {
-//    const a: f32 = try parseFloat(f32, "0xffffffffffffffff.0p0");
-//    const b: f32 = @floatCast(try parseFloat(f128, "0xffffffffffffffff.0p0"));
+//    const a: f32 = try parse(f32, "0xffffffffffffffff.0p0");
+//    const b: f32 = @floatCast(try parse(f128, "0xffffffffffffffff.0p0"));
 //    try std.testing.expectEqual(a, b);
 //}
 //
 //test "hex.special" {
-//    try testing.expect(math.isNan(try parseFloat(f32, "nAn")));
-//    try testing.expect(math.isPositiveInf(try parseFloat(f32, "iNf")));
-//    try testing.expect(math.isPositiveInf(try parseFloat(f32, "+Inf")));
-//    try testing.expect(math.isNegativeInf(try parseFloat(f32, "-iNf")));
+//    try testing.expect(math.isNan(try parse(f32, "nAn")));
+//    try testing.expect(math.isPositiveInf(try parse(f32, "iNf")));
+//    try testing.expect(math.isPositiveInf(try parse(f32, "+Inf")));
+//    try testing.expect(math.isNegativeInf(try parse(f32, "-iNf")));
 //
-//    try testing.expect(math.isPositiveInf(try parseFloat(f32, "0x9999p9999")));
-//    try testing.expect(math.isNegativeInf(try parseFloat(f32, "-0x9999p9999")));
+//    try testing.expect(math.isPositiveInf(try parse(f32, "0x9999p9999")));
+//    try testing.expect(math.isNegativeInf(try parse(f32, "-0x9999p9999")));
 //}
 //
 //test "hex.zero" {
-//    try testing.expectEqual(@as(f32, 0.0), try parseFloat(f32, "0x0"));
-//    try testing.expectEqual(@as(f32, 0.0), try parseFloat(f32, "-0x0"));
-//    try testing.expectEqual(@as(f32, 0.0), try parseFloat(f32, "0x0p42"));
-//    try testing.expectEqual(@as(f32, 0.0), try parseFloat(f32, "-0x0.00000p42"));
-//    try testing.expectEqual(@as(f32, 0.0), try parseFloat(f32, "0x0.00000p666"));
+//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "0x0"));
+//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "-0x0"));
+//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "0x0p42"));
+//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "-0x0.00000p42"));
+//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "0x0.00000p666"));
 //}
 //
 //test "hex.f16" {
-//    try testing.expectEqual(try parseFloat(f16, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parseFloat(f16, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parseFloat(f16, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parseFloat(f16, "0x10p-10"), 0.015625);
+//    try testing.expectEqual(try parse(f16, "0x1p0"), 1.0);
+//    try testing.expectEqual(try parse(f16, "-0x1p-1"), -0.5);
+//    try testing.expectEqual(try parse(f16, "0x10p+10"), 16384.0);
+//    try testing.expectEqual(try parse(f16, "0x10p-10"), 0.015625);
 //    // Max normalized value.
-//    try testing.expectEqual(try parseFloat(f16, "0x1.ffcp+15"), math.floatMax(f16));
-//    try testing.expectEqual(try parseFloat(f16, "-0x1.ffcp+15"), -math.floatMax(f16));
+//    try testing.expectEqual(try parse(f16, "0x1.ffcp+15"), math.floatMax(f16));
+//    try testing.expectEqual(try parse(f16, "-0x1.ffcp+15"), -math.floatMax(f16));
 //    // Min normalized value.
-//    try testing.expectEqual(try parseFloat(f16, "0x1p-14"), math.floatMin(f16));
-//    try testing.expectEqual(try parseFloat(f16, "-0x1p-14"), -math.floatMin(f16));
+//    try testing.expectEqual(try parse(f16, "0x1p-14"), math.floatMin(f16));
+//    try testing.expectEqual(try parse(f16, "-0x1p-14"), -math.floatMin(f16));
 //    // Min denormal value.
-//    try testing.expectEqual(try parseFloat(f16, "0x1p-24"), math.floatTrueMin(f16));
-//    try testing.expectEqual(try parseFloat(f16, "-0x1p-24"), -math.floatTrueMin(f16));
+//    try testing.expectEqual(try parse(f16, "0x1p-24"), math.floatTrueMin(f16));
+//    try testing.expectEqual(try parse(f16, "-0x1p-24"), -math.floatTrueMin(f16));
 //}
 
 //test "hex.f32" {
-//    try testing.expectError(error.InvalidCharacter, parseFloat(f32, "0x"));
-//    try testing.expectEqual(try parseFloat(f32, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parseFloat(f32, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parseFloat(f32, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parseFloat(f32, "0x10p-10"), 0.015625);
-//    try testing.expectEqual(try parseFloat(f32, "0x0.ffffffp128"), 0x0.ffffffp128);
-//    try testing.expectEqual(try parseFloat(f32, "0x0.1234570p-125"), 0x0.1234570p-125);
+//    try testing.expectError(error.InvalidCharacter, parse(f32, "0x"));
+//    try testing.expectEqual(try parse(f32, "0x1p0"), 1.0);
+//    try testing.expectEqual(try parse(f32, "-0x1p-1"), -0.5);
+//    try testing.expectEqual(try parse(f32, "0x10p+10"), 16384.0);
+//    try testing.expectEqual(try parse(f32, "0x10p-10"), 0.015625);
+//    try testing.expectEqual(try parse(f32, "0x0.ffffffp128"), 0x0.ffffffp128);
+//    try testing.expectEqual(try parse(f32, "0x0.1234570p-125"), 0x0.1234570p-125);
 //    // Max normalized value.
-//    try testing.expectEqual(try parseFloat(f32, "0x1.fffffeP+127"), math.floatMax(f32));
-//    try testing.expectEqual(try parseFloat(f32, "-0x1.fffffeP+127"), -math.floatMax(f32));
+//    try testing.expectEqual(try parse(f32, "0x1.fffffeP+127"), math.floatMax(f32));
+//    try testing.expectEqual(try parse(f32, "-0x1.fffffeP+127"), -math.floatMax(f32));
 //    // Min normalized value.
-//    try testing.expectEqual(try parseFloat(f32, "0x1p-126"), math.floatMin(f32));
-//    try testing.expectEqual(try parseFloat(f32, "-0x1p-126"), -math.floatMin(f32));
+//    try testing.expectEqual(try parse(f32, "0x1p-126"), math.floatMin(f32));
+//    try testing.expectEqual(try parse(f32, "-0x1p-126"), -math.floatMin(f32));
 //    // Min denormal value.
-//    try testing.expectEqual(try parseFloat(f32, "0x1P-149"), math.floatTrueMin(f32));
-//    try testing.expectEqual(try parseFloat(f32, "-0x1P-149"), -math.floatTrueMin(f32));
+//    try testing.expectEqual(try parse(f32, "0x1P-149"), math.floatTrueMin(f32));
+//    try testing.expectEqual(try parse(f32, "-0x1P-149"), -math.floatTrueMin(f32));
 //}
 
 test "hex.f64" {
-    try testing.expectEqual(try parseFloat(f64, "0x1p0"), 1.0);
-    try testing.expectEqual(try parseFloat(f64, "-0x1p-1"), -0.5);
-    try testing.expectEqual(try parseFloat(f64, "0x10p+10"), 16384.0);
-    try testing.expectEqual(try parseFloat(f64, "0x10p-10"), 0.015625);
+    try testing.expectEqual(try parse(f64, "0x1p0"), 1.0);
+    try testing.expectEqual(try parse(f64, "-0x1p-1"), -0.5);
+    try testing.expectEqual(try parse(f64, "0x10p+10"), 16384.0);
+    try testing.expectEqual(try parse(f64, "0x10p-10"), 0.015625);
     // Max normalized value.
-    //try testing.expectEqual(try parseFloat(f64, "0x1.fffffffffffffp+1023"), math.floatMax(f64));
-    //try testing.expectEqual(try parseFloat(f64, "-0x1.fffffffffffffp1023"), -math.floatMax(f64));
+    //try testing.expectEqual(try parse(f64, "0x1.fffffffffffffp+1023"), math.floatMax(f64));
+    //try testing.expectEqual(try parse(f64, "-0x1.fffffffffffffp1023"), -math.floatMax(f64));
     // Min normalized value.
-    try testing.expectEqual(try parseFloat(f64, "0x1p-1022"), math.floatMin(f64));
-    try testing.expectEqual(try parseFloat(f64, "-0x1p-1022"), -math.floatMin(f64));
+    try testing.expectEqual(try parse(f64, "0x1p-1022"), math.floatMin(f64));
+    try testing.expectEqual(try parse(f64, "-0x1p-1022"), -math.floatMin(f64));
     // Min denormalized value.
-    try testing.expectEqual(try parseFloat(f64, "0x1p-1074"), math.floatTrueMin(f64));
-    try testing.expectEqual(try parseFloat(f64, "-0x1p-1074"), -math.floatTrueMin(f64));
+    try testing.expectEqual(try parse(f64, "0x1p-1074"), math.floatTrueMin(f64));
+    try testing.expectEqual(try parse(f64, "-0x1p-1074"), -math.floatTrueMin(f64));
 }
 
 //test "hex.f80" {
-//    try testing.expectEqual(try parseFloat(f80, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parseFloat(f80, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parseFloat(f80, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parseFloat(f80, "0x10p-10"), 0.015625);
+//    try testing.expectEqual(try parse(f80, "0x1p0"), 1.0);
+//    try testing.expectEqual(try parse(f80, "-0x1p-1"), -0.5);
+//    try testing.expectEqual(try parse(f80, "0x10p+10"), 16384.0);
+//    try testing.expectEqual(try parse(f80, "0x10p-10"), 0.015625);
 //    // Max normalized value.
-//    try testing.expectEqual(try parseFloat(f80, "0xf.fffffffffffffff7p+16380"), math.floatMax(f80));
-//    try testing.expectEqual(try parseFloat(f80, "-0xf.fffffffffffffff7p+16380"), -math.floatMax(f80));
+//    try testing.expectEqual(try parse(f80, "0xf.fffffffffffffff7p+16380"), math.floatMax(f80));
+//    try testing.expectEqual(try parse(f80, "-0xf.fffffffffffffff7p+16380"), -math.floatMax(f80));
 //    // Min normalized value.
-//    try testing.expectEqual(try parseFloat(f80, "0x1p-16382"), math.floatMin(f80));
-//    try testing.expectEqual(try parseFloat(f80, "-0x1p-16382"), -math.floatMin(f80));
+//    try testing.expectEqual(try parse(f80, "0x1p-16382"), math.floatMin(f80));
+//    try testing.expectEqual(try parse(f80, "-0x1p-16382"), -math.floatMin(f80));
 //    // Min denormalized value.
-//    try testing.expectEqual(try parseFloat(f80, "0x1p-16445"), math.floatTrueMin(f80));
-//    try testing.expectEqual(try parseFloat(f80, "-0x1p-16445"), -math.floatTrueMin(f80));
+//    try testing.expectEqual(try parse(f80, "0x1p-16445"), math.floatTrueMin(f80));
+//    try testing.expectEqual(try parse(f80, "-0x1p-16445"), -math.floatTrueMin(f80));
 //}
 //
 //test "hex.f128" {
-//    try testing.expectEqual(try parseFloat(f128, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parseFloat(f128, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parseFloat(f128, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parseFloat(f128, "0x10p-10"), 0.015625);
+//    try testing.expectEqual(try parse(f128, "0x1p0"), 1.0);
+//    try testing.expectEqual(try parse(f128, "-0x1p-1"), -0.5);
+//    try testing.expectEqual(try parse(f128, "0x10p+10"), 16384.0);
+//    try testing.expectEqual(try parse(f128, "0x10p-10"), 0.015625);
 //    // Max normalized value.
-//    try testing.expectEqual(try parseFloat(f128, "0xf.fffffffffffffffffffffffffff8p+16380"), math.floatMax(f128));
-//    try testing.expectEqual(try parseFloat(f128, "-0xf.fffffffffffffffffffffffffff8p+16380"), -math.floatMax(f128));
+//    try testing.expectEqual(try parse(f128, "0xf.fffffffffffffffffffffffffff8p+16380"), math.floatMax(f128));
+//    try testing.expectEqual(try parse(f128, "-0xf.fffffffffffffffffffffffffff8p+16380"), -math.floatMax(f128));
 //    // Min normalized value.
-//    try testing.expectEqual(try parseFloat(f128, "0x1p-16382"), math.floatMin(f128));
-//    try testing.expectEqual(try parseFloat(f128, "-0x1p-16382"), -math.floatMin(f128));
+//    try testing.expectEqual(try parse(f128, "0x1p-16382"), math.floatMin(f128));
+//    try testing.expectEqual(try parse(f128, "-0x1p-16382"), -math.floatMin(f128));
 //    // Min denormalized value.
-//    try testing.expectEqual(try parseFloat(f128, "0x1p-16494"), math.floatTrueMin(f128));
-//    try testing.expectEqual(try parseFloat(f128, "-0x1p-16494"), -math.floatTrueMin(f128));
+//    try testing.expectEqual(try parse(f128, "0x1p-16494"), math.floatTrueMin(f128));
+//    try testing.expectEqual(try parse(f128, "-0x1p-16494"), -math.floatTrueMin(f128));
 //    // ensure round-to-even
-//    try testing.expectEqual(try parseFloat(f128, "0x1.edcb34a235253948765432134674fp-1"), 0x1.edcb34a235253948765432134674fp-1);
+//    try testing.expectEqual(try parse(f128, "0x1.edcb34a235253948765432134674fp-1"), 0x1.edcb34a235253948765432134674fp-1);
 //}

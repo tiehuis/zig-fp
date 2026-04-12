@@ -1,16 +1,27 @@
 const std = @import("std");
-const fp = @import("fp.zig");
+const fp = @import("fp");
 
 extern "c" fn uscalec_fixed(dst: [*]u8, f: f64, n: c_int) void;
 extern "c" fn uscalec_short(dst: [*]u8, f: f64) void;
 extern "c" fn uscalec_parse(src: [*c]const u8, len: usize) f64;
 
 pub fn main(init: std.process.Init) !void {
+    const gpa = std.heap.smp_allocator;
+    var it = try init.minimal.args.iterateAllocator(gpa);
+    defer it.deinit();
+
+    var seed: ?u64 = 0;
+    while (it.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--seed=")) {
+            seed = try std.fmt.parseUnsigned(usize, arg["--seed=".len..], 10);
+        }
+    }
+
     var prng = prng: {
-        var seed: u64 = undefined;
-        init.io.random(@ptrCast(&seed));
-        break :prng std.Random.DefaultPrng.init(seed);
+        if (seed == null) init.io.random(@ptrCast(&seed));
+        break :prng std.Random.DefaultPrng.init(seed.?);
     };
+
     const rand = prng.random();
     var i: usize = 0;
     while (true) : (i += 1) {
@@ -23,6 +34,7 @@ pub fn main(init: std.process.Init) !void {
 
         //const precision = rand.intRangeAtMost(usize, 1, 10);
         //fail = fail or try checkFixedStd(i, f, precision);
+
         fail = fail or try checkShortStd(i, f);
         if (fail) break;
     }
@@ -37,7 +49,7 @@ fn checkShortC(i: usize, f: f64) !bool {
     const c_short_len = std.mem.len(@as([*c]u8, &c_short_buf));
     const c_short_s = c_short_buf[0..c_short_len];
 
-    const zig_pf = fp.parseFloat(f64, zig_short_s) catch |err| {
+    const zig_pf = fp.parse(f64, zig_short_s) catch |err| {
         std.debug.print("{} error while parsing: {s}\n", .{ i, c_short_s });
         return err;
     };
@@ -75,7 +87,7 @@ fn checkShortC(i: usize, f: f64) !bool {
 
 fn checkShortStd(i: usize, f: f64) !bool {
     var zig_short_buf: [256]u8 = undefined;
-    const zig_short_s = fp.print(f64, &zig_short_buf, f, .{ .mode = .scientific });
+    const zig_short_s = try fp.format(f64, &zig_short_buf, f, .{ .mode = .scientific });
 
     var zigstd_short_buf: [256]u8 = undefined;
     const zigstd_short_s = try std.fmt.float.render(&zigstd_short_buf, f, .{ .mode = .scientific });
@@ -89,7 +101,7 @@ fn checkShortStd(i: usize, f: f64) !bool {
         return true;
     }
 
-    const zig_pf = fp.parseFloat(f64, zig_short_s) catch |err| {
+    const zig_pf = fp.parse(f64, zig_short_s) catch |err| {
         std.debug.print("{} error while parsing: {s}\n", .{ i, zig_short_s });
         return err;
     };

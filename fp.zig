@@ -164,7 +164,7 @@ fn parseDigits(s: []const u8, acc: *u64, base: u8) usize {
 }
 
 // Returns base^n
-fn minNDigit(base: u8, n: usize) u64 {
+fn minNDigit(comptime base: u8, n: usize) u64 {
     var acc: u64 = 1;
     var i: usize = 1;
     while (i < n) : (i += 1) acc *= base;
@@ -172,7 +172,7 @@ fn minNDigit(base: u8, n: usize) u64 {
 }
 
 // Parse digits, upper bounded by `bound` * `base`.
-fn parseDigitsBounded(s: []const u8, acc: *u64, base: u8, bound: usize) usize {
+fn parseDigitsBounded(s: []const u8, acc: *u64, comptime base: u8, comptime bound: usize) usize {
     const lo: u8 = '0';
     const hi: u8 = if (base == 10) '9' else 'f';
 
@@ -200,6 +200,7 @@ fn parseNumber(s: []const u8, comptime info: FormatInfo) ?Number {
     var n_frac_digits: usize = 0;
     i += n_man_digits;
 
+    // first-attempt: parse mantissa assuming no overflow
     if (i < s.len and s[i] == '.') {
         n_frac_digits = parseDigits(s[i + 1 ..], &n.m, info.base);
         i += 1 + n_frac_digits;
@@ -238,19 +239,19 @@ fn parseNumber(s: []const u8, comptime info: FormatInfo) ?Number {
         return n;
     }
 
-    // If we read too many mantissa digits, we overflowed and the mantissa value is unusable.
-    // Reparse, bounding the number of digits read to those which can contribute to the result.
-    // This is special-cased since it greatly improves the common-case instead of doing unconditionally.
+    // second-attempt: re-parse mantissa, bounding digits to avoid overflow.
     n.m = 0;
     n.excess_digits = true;
     // preserve n.e
-    i = 0;
 
-    const bound = minNDigit(info.base, info.max_mantissa_digits);
+    const bound = comptime minNDigit(info.base, info.max_mantissa_digits);
     const int_digit_count = parseDigitsBounded(s, &n.m, info.base, bound);
     if (n.m < bound) {
         std.debug.assert(s[int_digit_count] == '.');
-        n_frac_digits = parseDigitsBounded(s[int_digit_count + 1 ..], &n.m, info.base, bound);
+        // optimization for degenerate case 0.00000xx: scan for first non-zero directly
+        var skip: usize = 0;
+        if (n.m == 0) while (s[int_digit_count + 1 + skip] == '0') : (skip += 1) {};
+        n_frac_digits = skip + parseDigitsBounded(s[int_digit_count + 1 + skip ..], &n.m, info.base, bound);
     } else {
         // no '.' was found, large int, no implicit exponent
         n_frac_digits = 0;

@@ -11,7 +11,7 @@ A few additional things this adds beyond just a zig port:
  - [ ] f128 backend support
  - [ ] performance improvements
  - [ ] genericize for different float types
- - [ ] underscore support
+ - [x] underscore support
 
 ## Build
 
@@ -29,116 +29,134 @@ zig build size-fp -Doptimize=ReleaseSmall
 zig build size-std -Doptimize=ReleaseSmall
 ```
 
+### Test Fixed Samples
+
+```
+$ zig build perf -Doptimize=ReleaseFast -- --seed=0 '--sample=3.141592652589793238462643383279502884197169399375105' --zmij=true
+# mode=scientific precision=null seed=0x0 iters=10000 accumulator=0xfa23acbdc0a4186800 sample=3.141592652589793e0
+  pf: format: 14.02ns, parse: 16.09ns
+ std: format: 20.24ns, parse: 13.07ns
+zmij: format: 14.03ns
+```
+
 ## Performance
 
-Comparisons against current std implemenation (ryu).
+Comparisons against current std implemenation (ryu) and [zmij](https://github.com/de-sh/zmij).
+
+| *zmij only supports f64 scientific output*
 
 ```
 # precision = null (shortest)
 
-$ zig build perf -Doptimize=ReleaseFast -- --seed=0
-# mode=scientific precision=null seed=0x0 accumulator=0xf438ef51bb6f4f0c22346
-  pf: format: 23.26ns, parse: 22.61ns
- std: format: 25.50ns, parse: 23.28ns
+$ zig build perf -Doptimize=ReleaseFast -- --seed=0 --zmij=true
+# mode=scientific precision=null seed=0x0 iters=10000 accumulator=0x1f357339e4ee5c3073c sample=null
+  pf: format: 14.54ns, parse: 15.51ns
+ std: format: 21.42ns, parse: 15.77ns
+zmij: format: 14.08ns
 
-$ zig build perf -Doptimize=ReleaseSafe -- --seed=0
-# mode=scientific precision=null seed=0x0 accumulator=0xf438ef51bb6f4f0c22346
-  pf: format: 33.24ns, parse: 30.17ns
- std: format: 32.41ns, parse: 34.40ns
+$ zig build perf -Doptimize=ReleaseSafe -- --seed=0 --zmij=true
+# mode=scientific precision=null seed=0x0 iters=10000 accumulator=0x1f357339e4ee5c3073c sample=null
+  pf: format: 15.68ns, parse: 17.65ns
+ std: format: 30.48ns, parse: 24.03ns
+zmij: format: 16.14ns
 
-$ zig build perf -Doptimize=ReleaseSmall -- --seed=0
-# mode=scientific precision=null seed=0x0 accumulator=0xf438ef51bb6f4f0c22346
-  pf: format: 35.39ns, parse: 31.16ns
- std: format: 45.40ns, parse: 53.78ns
+$ zig build perf -Doptimize=ReleaseSmall -- --seed=0 --zmij=true
+# mode=scientific precision=null seed=0x0 iters=10000 accumulator=0x1f357339e4ee5c3073c sample=null
+  pf: format: 16.80ns, parse: 18.69ns
+ std: format: 35.96ns, parse: 45.45ns
+zmij: format: 16.23ns
 
-$ zig build perf -Doptimize=Debug -- --seed=0
-# mode=scientific precision=null seed=0x0 accumulator=0xf438ef51bb6f4f0c22346
-  pf: format: 274.40ns, parse: 242.40ns
- std: format: 309.52ns, parse: 509.21ns
+$ zig build perf -Doptimize=Debug -- --seed=0 --zmij=true
+# mode=scientific precision=null seed=0x0 iters=10000 accumulator=0x1f357339e4ee5c3073c sample=null
+  pf: format: 188.99ns, parse: 193.22ns
+ std: format: 214.47ns, parse: 422.66ns
+zmij: format: 133.63ns
 ```
 
 ```
 # precision = 10 (fixed)
 
 $ zig build perf -Doptimize=ReleaseFast -- --seed=0 --precision=10
-# mode=scientific precision=10 seed=0x0 accumulator=0xf438ef51bb6f4fb662b52
-  pf: format: 21.29ns, parse: 23.46ns
- std: format: 33.69ns, parse: 22.76ns
+# mode=scientific precision=10 seed=0x0 iters=10000 accumulator=0x1f357339e4ee6365fc6 sample=null
+  pf: format: 7.63ns, parse: 13.37ns
+ std: format: 26.02ns, parse: 14.15ns
 
 $ zig build perf -Doptimize=ReleaseSafe -- --seed=0 --precision=10
-# mode=scientific precision=10 seed=0x0 accumulator=0xf438ef51bb6f4fb662b52
-  pf: format: 25.60ns, parse: 23.41ns
- std: format: 43.31ns, parse: 30.88ns
+# mode=scientific precision=10 seed=0x0 iters=10000 accumulator=0x1f357339e4ee6365fc6 sample=null
+  pf: format: 8.99ns, parse: 15.42ns
+ std: format: 34.04ns, parse: 21.16ns
 
 $ zig build perf -Doptimize=ReleaseSmall -- --seed=0 --precision=10
-# mode=scientific precision=10 seed=0x0 accumulator=0xf438ef51bb6f4fb662b52
-  pf: format: 25.78ns, parse: 24.17ns
- std: format: 82.85ns, parse: 46.77ns
+# mode=scientific precision=10 seed=0x0 iters=10000 accumulator=0x1f357339e4ee6365fc6 sample=null
+  pf: format: 11.35ns, parse: 16.68ns
+ std: format: 46.22ns, parse: 40.14ns
 
 $ zig build perf -Doptimize=Debug -- --seed=0 --precision=10
-# mode=scientific precision=10 seed=0x0 accumulator=0xf438ef51bb6f4fb662b52
-  pf: format: 198.78ns, parse: 214.04ns
- std: format: 330.89ns, parse: 438.64ns
+# mode=scientific precision=10 seed=0x0 iters=10000 accumulator=0x1f357339e4ee6365fc6 sample=null
+  pf: format: 127.21ns, parse: 176.92ns
+ std: format: 227.01ns, parse: 372.34ns
 ```
 
 ## Size
 
 ### ReleaseFast
 
+| *std includes hex-float formatting in std.Io.Writer instead of std.fmt so we exclude for a more direct comparison.*
+
 ```
-$ zig build size-fp -Doptimize=ReleaseFast
+$ zig build size-fp -Doptimize=ReleaseFast -Ddisable-hex-formatting=true
     FILE SIZE        VM SIZE
  --------------  --------------
-  29.3%  27.4Ki   0.0%       0    .rela.debug_info
-  18.0%  16.8Ki   0.0%       0    .debug_loc
-  12.5%  11.7Ki   0.0%       0    .debug_info
-  11.9%  11.1Ki  65.5%  11.0Ki    .rodata
-   7.6%  7.05Ki   0.0%       0    .debug_str
-   5.7%  5.36Ki  31.4%  5.29Ki    .text
-   4.3%  4.00Ki   0.0%       0    .debug_line
-   2.8%  2.59Ki   0.0%       0    .debug_ranges
-   1.5%  1.42Ki   0.0%       0    .debug_pubnames
-   1.4%  1.27Ki   0.0%       0    .debug_pubtypes
-   1.0%     941   0.0%       0    .debug_abbrev
-   0.9%     832   0.0%       0    .symtab
-   0.7%     712   0.0%       0    .rela.text
-   0.6%     556   0.0%       0    .strtab
-   0.4%     420   0.1%      16    [6 Others]
-   0.3%     320   1.5%     256    .eh_frame
-   0.3%     277   1.2%     213    .rodata.str1.1
+  30.0%  29.8Ki   0.0%       0    .rela.debug_info
+  16.9%  16.8Ki   0.0%       0    .debug_loc
+  12.8%  12.7Ki   0.0%       0    .debug_info
+  11.2%  11.1Ki  61.8%  11.0Ki    .rodata
+   7.5%  7.41Ki   0.0%       0    .debug_str
+   6.3%  6.31Ki  35.0%  6.25Ki    .text
+   4.5%  4.52Ki   0.0%       0    .debug_line
+   2.8%  2.80Ki   0.0%       0    .debug_ranges
+   1.6%  1.63Ki   0.0%       0    .debug_pubnames
+   1.3%  1.28Ki   0.0%       0    .debug_pubtypes
+   0.9%     962   0.0%       0    .debug_abbrev
+   0.9%     928   0.0%       0    .symtab
+   0.8%     784   0.0%       0    .rela.text
+   0.6%     646   0.0%       0    .strtab
+   0.4%     414   0.1%      16    [6 Others]
+   0.4%     384   1.7%     320    .eh_frame
+   0.3%     291   1.2%     227    .rodata.str1.1
    0.3%     258   0.0%       0    [AR Headers]
+   0.2%     232   0.0%       0    .rela.eh_frame
    0.2%     192   0.0%       0    [ELF Headers]
-   0.2%     184   0.0%       0    .rela.eh_frame
-   0.1%     112   0.3%      48    .rodata.cst16
- 100.0%  93.3Ki 100.0%  16.8Ki    TOTAL
+   0.1%      96   0.2%      32    .rodata.cst16
+ 100.0%  99.4Ki 100.0%  17.9Ki    TOTAL
 ```
 
 ```
-$ zig build size-fp -Doptimize=ReleaseFast -Duse-compact-tables=true
+$ zig build size-fp -Doptimize=ReleaseFast -Ddisable-hex-formatting=true -Duse-compact-tables=true
     FILE SIZE        VM SIZE
  --------------  --------------
-  31.2%  29.4Ki   0.0%       0    .rela.debug_info
-  23.3%  22.0Ki   0.0%       0    .debug_loc
-  13.3%  12.5Ki   0.0%       0    .debug_info
-   7.8%  7.30Ki   0.0%       0    .debug_str
-   7.5%  7.04Ki  82.0%  6.98Ki    .text
-   4.9%  4.57Ki   0.0%       0    .debug_line
-   2.8%  2.59Ki   0.0%       0    .debug_ranges
-   1.6%  1.48Ki   0.0%       0    .debug_pubnames
-   1.5%  1.37Ki   0.0%       0    .debug_pubtypes
-   1.1%  1.08Ki  11.9%  1.02Ki    .rodata
-   1.0%     932   0.0%       0    .debug_abbrev
-   0.9%     856   0.0%       0    .rela.text
-   0.9%     856   0.0%       0    .symtab
-   0.6%     568   0.0%       0    .strtab
-   0.4%     414   0.2%      16    [6 Others]
-   0.3%     320   2.9%     256    .eh_frame
-   0.3%     277   2.4%     213    .rodata.str1.1
+  31.8%  31.6Ki   0.0%       0    .rela.debug_info
+  21.7%  21.5Ki   0.0%       0    .debug_loc
+  13.6%  13.5Ki   0.0%       0    .debug_info
+   8.0%  7.98Ki  83.2%  7.92Ki    .text
+   7.6%  7.59Ki   0.0%       0    .debug_str
+   5.1%  5.06Ki   0.0%       0    .debug_line
+   2.8%  2.78Ki   0.0%       0    .debug_ranges
+   1.7%  1.69Ki   0.0%       0    .debug_pubnames
+   1.3%  1.30Ki   0.0%       0    .debug_pubtypes
+   1.1%  1.08Ki  10.7%  1.02Ki    .rodata
+   0.9%     953   0.0%       0    .debug_abbrev
+   0.9%     952   0.0%       0    .symtab
+   0.9%     928   0.0%       0    .rela.text
+   0.6%     658   0.0%       0    .strtab
+   0.4%     417   0.2%      16    [6 Others]
+   0.4%     384   3.3%     320    .eh_frame
+   0.3%     291   2.3%     227    .rodata.str1.1
    0.3%     258   0.0%       0    [AR Headers]
+   0.2%     232   0.0%       0    .rela.eh_frame
    0.2%     192   0.0%       0    [ELF Headers]
-   0.2%     184   0.0%       0    .rela.eh_frame
-   0.1%     112   0.6%      48    .rodata.cst16
- 100.0%  94.1Ki 100.0%  8.52Ki    TOTAL
+   0.1%      96   0.3%      32    .rodata.cst16
+ 100.0%  99.4Ki 100.0%  9.51Ki    TOTAL
 ```
 
 ```
@@ -172,45 +190,45 @@ $ zig build size-std -Doptimize=ReleaseFast
 ### ReleaseSmall
 
 ```
-$ zig build size-fp -Doptimize=ReleaseSmall
+$ zig build size-fp -Doptimize=ReleaseSmall -Ddisable-hex-formatting=true
     FILE SIZE        VM SIZE
  --------------  --------------
-  60.3%  11.1Ki  69.6%  11.0Ki    .rodata
-  22.7%  4.18Ki  26.0%  4.12Ki    .text
-   3.9%     736   0.0%       0    .rela.text
-   3.1%     584   2.8%     456    .eh_frame
-   2.0%     376   0.0%       0    .symtab
-   1.7%     328   0.0%       0    .rela.eh_frame
-   1.5%     286   1.4%     222    .rodata.str1.1
-   1.4%     258   0.0%       0    [AR Headers]
-   1.4%     257   0.0%       0    .strtab
-   0.7%     128   0.0%       0    [ELF Headers]
+  57.4%  11.1Ki  66.2%  11.0Ki    .rodata
+  25.6%  4.94Ki  29.3%  4.87Ki    .text
+   4.2%     832   0.0%       0    .rela.text
+   3.1%     616   2.9%     488    .eh_frame
+   1.9%     376   0.0%       0    .symtab
+   1.8%     352   0.0%       0    .rela.eh_frame
+   1.5%     300   1.4%     236    .rodata.str1.1
+   1.3%     258   0.0%       0    [AR Headers]
+   1.3%     257   0.0%       0    .strtab
+   0.6%     128   0.0%       0    [ELF Headers]
    0.5%      96   0.2%      32    .rodata.cst16
    0.4%      80   0.1%      16    .rodata.cst8
    0.3%      54   0.0%       0    [AR Symbol Table]
-   0.1%      14   0.0%       0    [Unmapped]
- 100.0%  18.4Ki 100.0%  15.9Ki    TOTAL
+   0.1%      12   0.0%       0    [Unmapped]
+ 100.0%  19.3Ki 100.0%  16.7Ki    TOTAL
 ```
 
 ```
-$ zig build size-fp -Doptimize=ReleaseSmall -Duse-compact-tables=true
+$ zig build size-fp -Doptimize=ReleaseSmall -Ddisable-hex-formatting=true -Duse-compact-tables=true
     FILE SIZE        VM SIZE
  --------------  --------------
-  51.3%  4.75Ki  72.7%  4.69Ki    .text
-  11.6%  1.08Ki  15.7%  1.02Ki    .rodata
-   9.8%     928   0.0%       0    .rela.text
-   6.6%     624   7.5%     496    .eh_frame
-   4.5%     424   0.0%       0    .symtab
-   3.7%     352   0.0%       0    .rela.eh_frame
-   3.0%     286   3.4%     222    .rodata.str1.1
-   2.9%     277   0.0%       0    .strtab
-   2.7%     258   0.0%       0    [AR Headers]
-   1.3%     128   0.0%       0    [ELF Headers]
-   1.0%      96   0.5%      32    .rodata.cst16
+  54.3%  5.56Ki  75.2%  5.50Ki    .text
+  10.5%  1.08Ki  13.9%  1.02Ki    .rodata
+   9.8%    1024   0.0%       0    .rela.text
+   6.3%     664   7.2%     536    .eh_frame
+   4.0%     424   0.0%       0    .symtab
+   3.6%     376   0.0%       0    .rela.eh_frame
+   2.9%     300   3.1%     236    .rodata.str1.1
+   2.6%     277   0.0%       0    .strtab
+   2.5%     258   0.0%       0    [AR Headers]
+   1.2%     128   0.0%       0    [ELF Headers]
+   0.9%      96   0.4%      32    .rodata.cst16
    0.8%      80   0.2%      16    .rodata.cst8
-   0.6%      54   0.0%       0    [AR Symbol Table]
-   0.1%      12   0.0%       0    [Unmapped]
- 100.0%  9.27Ki 100.0%  6.45Ki    TOTAL
+   0.5%      54   0.0%       0    [AR Symbol Table]
+   0.1%      13   0.0%       0    [Unmapped]
+ 100.0%  10.2Ki 100.0%  7.32Ki    TOTAL
 ```
 
 ```

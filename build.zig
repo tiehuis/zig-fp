@@ -10,21 +10,27 @@ pub fn build(b: *std.Build) void {
         "use-legacy-exponent-form",
         "use legacy exponent form for compatibility",
     ) orelse false;
-    const option_use_fast_trim_zeros = b.option(
-        bool,
-        "use-fast-trim-zeros",
-        "use fast trim zeros for formatting",
-    ) orelse false;
     const option_use_compact_tables = b.option(
         bool,
         "use-compact-tables",
         "use compact tables",
     ) orelse false;
+    const option_disable_underscore_support = b.option(
+        bool,
+        "disable-underscore-support",
+        "disable underscore support",
+    ) orelse false;
+    const option_disable_hex_formatting = b.option(
+        bool,
+        "disable-hex-formatting",
+        "disable hex formatting",
+    ) orelse false;
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "use_legacy_exponent_form", option_use_legacy_exponent_form);
-    build_options.addOption(bool, "use_fast_trim_zeros", option_use_fast_trim_zeros);
     build_options.addOption(bool, "use_compact_tables", option_use_compact_tables);
+    build_options.addOption(bool, "disable_underscore_support", option_disable_underscore_support);
+    build_options.addOption(bool, "disable_hex_formatting", option_disable_hex_formatting);
 
     const fp_mod = b.createModule(.{
         .root_source_file = b.path("fp.zig"),
@@ -33,6 +39,23 @@ pub fn build(b: *std.Build) void {
     });
     fp_mod.addOptions("build_options", build_options);
 
+    const tests = b.addTest(.{
+        .root_module = fp_mod,
+    });
+
+    const test_run = b.addRunArtifact(tests);
+    if (b.args) |args| test_run.addArgs(args);
+
+    const test_step = b.step("test", "run tests");
+    test_step.dependOn(&test_run.step);
+
+    // zmij
+    const zmij_mod = b.createModule(.{
+        .root_source_file = b.path("third_party/zmij.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // extra/main_perf.zig
     const perf_mod = b.createModule(.{
         .root_source_file = b.path("extra/main_perf.zig"),
@@ -40,6 +63,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     perf_mod.addImport("fp", fp_mod);
+    perf_mod.addImport("zmij", zmij_mod);
 
     const perf_exe = b.addExecutable(.{
         .name = "perf",

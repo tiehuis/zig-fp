@@ -5,20 +5,28 @@ const build_options = @import("build_options");
 /// additionally be performed if more bytes are required.
 pub const min_buffer_size = 53;
 
+pub const ParseError = error{
+    Empty,
+    NoDigits,
+    NoDigitAfterExponent,
+    TrailingData,
+    InvalidUnderscores,
+};
+
 /// Parse a float from a string, returning the requested type.
 /// Returns an error if the input is malformed.
-pub fn parse(comptime F: type, s: []const u8) !F {
+pub fn parse(comptime F: type, s: []const u8) ParseError!F {
     std.debug.assert(F == f64);
-    if (s.len == 0) return error.InvalidCharacter;
+    if (s.len == 0) return error.Empty;
     const sign: F = if (s[0] == '-') -1.0 else 1.0;
     const i: usize = @intFromBool(s[0] == '-' or s[0] == '+');
 
     if (s[i..].len >= 2 and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
-        const n = parseNumber(s[i + 2 ..], .{
+        const n = try parseNumber(s[i + 2 ..], .{
             .base = 16,
             .max_mantissa_digits = 16,
             .exp_char_lower = 'p',
-        }) orelse return error.InvalidCharacter;
+        });
 
         return sign * parseHex(F, n.m, n.e, n.excess_digits);
     } else {
@@ -26,10 +34,8 @@ pub fn parse(comptime F: type, s: []const u8) !F {
             .base = 10,
             .max_mantissa_digits = 19,
             .exp_char_lower = 'e',
-        }) orelse if (parseInfOrNan(F, s[i..])) |f| {
-            return sign * f;
-        } else {
-            return error.InvalidCharacter;
+        }) catch |err| {
+            return if (parseInfOrNan(F, s[i..])) |f| sign * f else err;
         };
 
         // TODO: Can the main `parse` logic handle this?
@@ -51,15 +57,10 @@ pub const Mode = enum {
     hex,
 };
 
-pub const Case = enum {
-    upper,
-    lower,
-};
-
 pub const Options = struct {
     precision: ?usize = null,
     mode: Mode = .scientific,
-    case: Case = .lower,
+    case: std.fmt.Case = .lower,
 };
 
 /// Print a float to a user-supplied buffer.
@@ -68,8 +69,8 @@ pub fn format(comptime F: type, s: []u8, f: F, options: Options) ![]const u8 {
     if (formatSpecial(F, s, f, options)) |r| return r;
 
     const len = blk: {
-        if (false and options.mode == .hex) {
-            break :blk formatHex(s[1..], f, options);
+        if (!build_options.disable_hex_formatting and options.mode == .hex) {
+            break :blk try formatHex(F, s[1..], f, options);
         } else {
             const m, const e = if (options.precision) |prec| fixed(f, @intCast(prec + 1)) else short(f);
             const d = digits(m);
@@ -89,12 +90,12 @@ pub fn format(comptime F: type, s: []u8, f: F, options: Options) ![]const u8 {
     }
 }
 
-fn formatHex(s: []u8, f: f64, options: Options) usize {
-    _ = s;
-    _ = f;
-    _ = options;
-    @compileError("unimplemented");
-}
+const Number = struct {
+    m: u64 = 0,
+    e: i32 = 0,
+    // TODO: can we get rid of this field?
+    excess_digits: bool = false,
+};
 
 fn parseInfOrNan(comptime T: type, s: []const u8) ?T {
     if (std.ascii.eqlIgnoreCase(s, "inf") or std.ascii.eqlIgnoreCase(s, "infinity")) {
@@ -104,13 +105,6 @@ fn parseInfOrNan(comptime T: type, s: []const u8) ?T {
     }
     return null;
 }
-
-const Number = struct {
-    m: u64 = 0,
-    e: i32 = 0,
-    // TODO: can we get rid of this field?
-    excess_digits: bool = false,
-};
 
 /// Determine if 8 bytes are all decimal digits.
 /// This does not care about the order in which the bytes were loaded.
@@ -140,27 +134,59 @@ fn parse8Digits(v_: u64) u64 {
     return @as(u64, @as(u32, @truncate((v1 +% v2) >> 32)));
 }
 
+// Return integer value of digit in the given base or null if not valid.
+inline fn digitValue(comptime base: u8, c: u8) ?u8 {
+    return switch (base) {
+        10 => switch (c) {
+            '0'...'9' => c - '0',
+            else => null,
+        },
+        16 => switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a',
+            'A'...'F' => c - 'A',
+            else => null,
+        },
+        else => unreachable,
+    };
+}
+
 /// Parse digits until a non-digit is encountered. Returns how many digits were parsed.
 /// This may overflow the given u64 in which case it will be reparsed later.
-fn parseDigits(s: []const u8, acc: *u64, base: u8) usize {
+fn parseDigits(s: []const u8, acc: *u64, comptime base: u8) struct { usize, usize } {
     var i: usize = 0;
+    var skipped: usize = 0;
 
     if (base == 10) {
-        while (i + 8 < s.len) : (i += 8) {
+        while (i + 8 <= s.len) : (i += 8) {
             const v = std.mem.readInt(u64, s[i..][0..8], .little);
             if (!is8Digits(v)) break;
             acc.* = acc.* *% 1_0000_0000 +% parse8Digits(v);
         }
     }
 
-    const lo: u8 = '0';
-    const hi: u8 = if (base == 10) '9' else 'f';
-    while (i < s.len) : (i += 1) {
-        if (!(lo <= s[i] and s[i] <= hi)) break;
-        acc.* = acc.* *% base +% (s[i] - '0');
+    loop: while (i < s.len) : (i += 1) {
+        if (!build_options.disable_underscore_support and s[i] == '_') {
+            skipped += 1;
+        } else if (digitValue(base, s[i])) |value| {
+            acc.* = acc.* *% base +% value;
+        } else break :loop;
     }
+    return .{ i - skipped, i };
+}
 
-    return i;
+// Parse digits, upper bounded by `bound` * `base`.
+fn parseDigitsBounded(s: []const u8, acc: *u64, comptime base: u8, comptime bound: usize) struct { usize, usize } {
+    var i: usize = 0;
+    var skipped: usize = 0;
+    loop: while (i < s.len and acc.* < bound) : (i += 1) {
+        if (!build_options.disable_underscore_support and s[i] == '_') {
+            skipped += 1;
+        } else if (digitValue(base, s[i])) |value| {
+            acc.* = acc.* *% base +% value;
+        } else break :loop;
+    }
+    return .{ i - skipped, i };
 }
 
 // Returns base^n
@@ -171,67 +197,71 @@ fn minNDigit(comptime base: u8, n: usize) u64 {
     return acc;
 }
 
-// Parse digits, upper bounded by `bound` * `base`.
-fn parseDigitsBounded(s: []const u8, acc: *u64, comptime base: u8, comptime bound: usize) usize {
-    const lo: u8 = '0';
-    const hi: u8 = if (base == 10) '9' else 'f';
-
-    var i: usize = 0;
-    while (i < s.len and acc.* < bound) : (i += 1) {
-        if (!(lo <= s[i] and s[i] <= hi)) break;
-        acc.* = acc.* *% base +% (s[i] - '0');
-    }
-    return i;
-}
-
 const FormatInfo = struct {
     base: u8,
     max_mantissa_digits: usize,
     exp_char_lower: u8,
 };
 
-fn parseNumber(s: []const u8, comptime info: FormatInfo) ?Number {
+fn parseNumber(s: []const u8, comptime info: FormatInfo) ParseError!Number {
     std.debug.assert(info.base == 10 or info.base == 16);
+    const implied_exp_mult: i32 = if (info.base == 16) 4 else 1;
     var n: Number = .{};
     var i: usize = 0;
 
-    const implied_exp_mult: i32 = if (info.base == 16) 4 else 1;
-    const n_man_digits = parseDigits(s, &n.m, info.base);
-    var n_frac_digits: usize = 0;
-    i += n_man_digits;
-
     // first-attempt: parse mantissa assuming no overflow
+    const n_man_digits, const consumed_int = parseDigits(s, &n.m, info.base);
+    var n_frac_digits: usize = 0;
+    i += consumed_int;
+
+    var consumed_frac: usize = 0;
     if (i < s.len and s[i] == '.') {
-        n_frac_digits = parseDigits(s[i + 1 ..], &n.m, info.base);
-        i += 1 + n_frac_digits;
+        n_frac_digits, consumed_frac = parseDigits(s[i + 1 ..], &n.m, info.base);
+        i += 1 + consumed_frac;
     }
     const n_digits = n_man_digits + n_frac_digits;
-    if (n_digits == 0) return null;
+    if (n_digits == 0) return error.NoDigits;
+    var seen_underscore = consumed_frac + consumed_int != n_digits;
 
     // exp char must be followed by at least one additional character
     if (i + 1 < s.len and std.ascii.toLower(s[i]) == info.exp_char_lower) {
         i += 1;
         var sign: i32 = 1;
-        switch (s[i]) {
-            '+' => {
-                i += 1;
-            },
-            '-' => {
-                i += 1;
-                sign = -1;
-            },
-            else => {},
+        if (s[i] == '+') {
+            i += 1;
+        } else if (s[i] == '-') {
+            i += 1;
+            sign = -1;
         }
-        if (i >= s.len or !std.ascii.isDigit(s[i])) return null;
+        if (i >= s.len or switch (s[i]) {
+            '0'...'9', '_' => false,
+            else => true,
+        }) return error.NoDigitAfterExponent;
 
-        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
-            // will saturate before overflow
-            if (n.e < 0x1000_000) n.e = 10 * n.e + (s[i] - '0');
+        loop: while (i < s.len) : (i += 1) {
+            switch (s[i]) {
+                '0'...'9' => n.e = 10 *| n.e +| (s[i] - '0'),
+                '_' => if (build_options.disable_underscore_support) break :loop else {
+                    seen_underscore = true;
+                },
+                else => break :loop,
+            }
         }
         n.e *= sign;
     }
 
-    if (i != s.len) return null;
+    if (i != s.len) return error.TrailingData;
+
+    if (!build_options.disable_underscore_support and seen_underscore) {
+        @branchHint(.unlikely);
+        var j: usize = 0;
+        while (j < s.len) : (j += 1) {
+            if (s[j] != '_') continue;
+            if (j == 0 or j + 1 >= s.len) return error.InvalidUnderscores;
+            if (digitValue(info.base, s[j - 1]) == null or digitValue(info.base, s[j + 1]) == null) return error.InvalidUnderscores;
+            j += 1; // next must be a digit, skip
+        }
+    }
 
     if (n_digits <= info.max_mantissa_digits) {
         @branchHint(.likely);
@@ -245,13 +275,15 @@ fn parseNumber(s: []const u8, comptime info: FormatInfo) ?Number {
     // preserve n.e
 
     const bound = comptime minNDigit(info.base, info.max_mantissa_digits);
-    const int_digit_count = parseDigitsBounded(s, &n.m, info.base, bound);
+    _, const consumed = parseDigitsBounded(s, &n.m, info.base, bound);
     if (n.m < bound) {
-        std.debug.assert(s[int_digit_count] == '.');
+        std.debug.assert(s[consumed] == '.');
+        const frac_digits = s[consumed + 1 ..];
         // optimization for degenerate case 0.00000xx: scan for first non-zero directly
         var skip: usize = 0;
-        if (n.m == 0) while (s[int_digit_count + 1 + skip] == '0') : (skip += 1) {};
-        n_frac_digits = skip + parseDigitsBounded(s[int_digit_count + 1 + skip ..], &n.m, info.base, bound);
+        if (n.m == 0) while (frac_digits[skip] == '0') : (skip += 1) {};
+        n_frac_digits, _ = parseDigitsBounded(frac_digits[skip..], &n.m, info.base, bound);
+        n_frac_digits += skip;
     } else {
         // no '.' was found, large int, no implicit exponent
         n_frac_digits = 0;
@@ -265,11 +297,11 @@ fn parseHex(comptime F: type, m_: u64, e_: i32, excess_digits: bool) F {
     var m = m_;
     var e = e_;
 
-    const max_exp = math.floatExponentMax(F);
-    const min_exp = math.floatExponentMin(F);
-    const mantissa_bits = math.floatMantissaBits(F);
-    const fractional_bits = math.floatFractionalBits(F);
-    const exp_bits = math.floatExponentBits(F);
+    const max_exp = std.math.floatExponentMax(F);
+    const min_exp = std.math.floatExponentMin(F);
+    const mantissa_bits = std.math.floatMantissaBits(F);
+    const fractional_bits = std.math.floatFractionalBits(F);
+    const exp_bits = std.math.floatExponentBits(F);
     const exp_bias = min_exp - 1;
 
     if (m == 0) return 0.0;
@@ -311,7 +343,7 @@ fn parseHex(comptime F: type, m_: u64, e_: i32, excess_digits: bool) F {
 
     // Infinity and range error
     if (e > max_exp) {
-        return math.inf(F);
+        return std.math.inf(F);
     }
 
     var bits = m & ((1 << mantissa_bits) - 1);
@@ -331,17 +363,125 @@ fn formatSpecial(comptime F: type, s: []u8, f: F, options: Options) ?[]const u8 
     n += (u >> 63) & 1;
 
     if (abs_u == 0) {
-        @memcpy(s[n..][0..3], "0e0");
-        n += 1 + 2 * @as(usize, @intFromBool(options.mode == .scientific));
+        if (options.mode == .hex) {
+            @branchHint(.unlikely);
+            @memcpy(s[n..][0..5], "0x0p0");
+            n += 5;
+        } else {
+            @memcpy(s[n..][0..3], "0e0");
+            n += 1 + 2 * @as(usize, @intFromBool(options.mode == .scientific));
+        }
     } else if ((u & ((1 << 52) - 1) == 0)) {
-        @memcpy(s[n..][0..3], "inf");
+        @memcpy(s[n..][0..3], switch (options.case) {
+            .upper => "INF",
+            .lower => "inf",
+        });
         n += 3;
     } else {
-        @memcpy(s[n..][0..3], "nan");
+        @memcpy(s[n..][0..3], switch (options.case) {
+            .upper => "NAN",
+            .lower => "nan",
+        });
         n += 3;
     }
 
     return s[0..n];
+}
+
+fn formatHex(comptime F: type, s: []u8, f: F, options: Options) !usize {
+    const U = std.meta.Int(.unsigned, @bitSizeOf(F));
+
+    const mantissa_bits = std.math.floatMantissaBits(F);
+    const fractional_bits = std.math.floatFractionalBits(F);
+    const exponent_bits = std.math.floatExponentBits(F);
+    const mantissa_mask = (1 << mantissa_bits) - 1;
+    const exponent_mask = (1 << exponent_bits) - 1;
+    const exponent_bias = (1 << (exponent_bits - 1)) - 1;
+
+    const as_bits: U = @bitCast(f);
+    var mantissa = as_bits & mantissa_mask;
+    var exponent: i32 = @as(u16, @truncate((as_bits >> mantissa_bits) & exponent_mask));
+
+    const is_denormal = exponent == 0 and mantissa != 0;
+    const is_zero = exponent == 0 and mantissa == 0;
+    std.debug.assert(!is_zero);
+
+    if (is_denormal) {
+        // Adjust the exponent for printing.
+        exponent += 1;
+    } else if (fractional_bits == mantissa_bits) {
+        mantissa |= 1 << fractional_bits; // Add the implicit integer bit.
+    }
+
+    const mantissa_digits = (fractional_bits + 3) / 4;
+    // Fill in zeroes to round the fraction width to a multiple of 4.
+    mantissa <<= mantissa_digits * 4 - fractional_bits;
+
+    if (options.precision) |precision| {
+        // Round if needed.
+        if (precision < mantissa_digits) {
+            // We always have at least 4 extra bits.
+            var extra_bits = (mantissa_digits - precision) * 4;
+            // The result LSB is the Guard bit, we need two more (Round and
+            // Sticky) to round the value.
+            while (extra_bits > 2) {
+                mantissa = (mantissa >> 1) | (mantissa & 1);
+                extra_bits -= 1;
+            }
+            // Round to nearest, tie to even.
+            mantissa |= @intFromBool(mantissa & 0b100 != 0);
+            mantissa += 1;
+            // Drop the excess bits.
+            mantissa >>= 2;
+            // Restore the alignment.
+            mantissa <<= @as(std.math.Log2Int(U), @intCast((mantissa_digits - precision) * 4));
+
+            const overflow = mantissa & (1 << 1 + mantissa_digits * 4) != 0;
+            // Prefer a normalized result in case of overflow.
+            if (overflow) {
+                mantissa >>= 1;
+                exponent += 1;
+            }
+        }
+    }
+
+    // +1 for the decimal part.
+    var buf: [1 + mantissa_digits]u8 = undefined;
+    std.debug.assert(std.fmt.printInt(&buf, mantissa, 16, options.case, .{ .fill = '0', .width = 1 + mantissa_digits }) == buf.len);
+
+    var i: usize = 0;
+    @memcpy(s[0..2], "0x");
+    i += 2;
+    s[i] = buf[0];
+    i += 1;
+
+    const trimmed = std.mem.trimEnd(u8, buf[1..], "0");
+    if (options.precision) |precision| {
+        if (precision > 0) {
+            s[i] = '.';
+            i += 1;
+        }
+    } else if (trimmed.len > 0) {
+        s[i] = '.';
+        i += 1;
+    }
+    if (i + trimmed.len > s.len) return error.BufferTooSmall;
+    @memcpy(s[i..][0..trimmed.len], trimmed);
+    i += trimmed.len;
+
+    // Add trailing zeros if explicitly requested.
+    if (options.precision) |precision| if (precision > 0) {
+        if (precision > trimmed.len) {
+            if (i + precision - trimmed.len > s.len) return error.BufferTooSmall;
+            @memset(s[i..][0 .. precision - trimmed.len], '0');
+            i += precision - trimmed.len;
+        }
+    };
+    if (i + 5 > s.len) return error.BufferTooSmall;
+    s[i] = 'p';
+    i += 1;
+    const exp_len = std.fmt.printInt(s[i..], exponent - exponent_bias, 10, .lower, .{});
+    return i + exp_len;
 }
 
 fn formatScientific(s: []u8, d: u64, cp: i32, nd: usize) !usize {
@@ -657,69 +797,29 @@ fn trimZeros(cx: u64, cp: i32) struct { u64, i32 } {
     var x = cx;
     var p = cp;
 
-    if (build_options.use_fast_trim_zeros) {
-        const max_u64 = std.math.maxInt(u64);
-        const inv5p8 = 0xc767074b22e90e21; // inverse of 5**8
-        const inv5p4 = 0xd288ce703afb7e91; // inverse of 5**4
-        const inv5p2 = 0x8f5c28f5c28f5c29; // inverse of 5**2
-        const inv5 = 0xcccccccccccccccd; // inverse of 5
-
-        // Cut 1 zero, or else return.
-        var d = std.math.rotr(u64, x *% inv5, 1);
-        if (d <= max_u64 / 10) {
-            x = d;
-            p += 1;
-        } else {
-            return .{ x, p };
-        }
-
-        // Cut 8 zeros, then 4, then 2, then 1.
-        d = std.math.rotr(u64, x *% inv5p8, 8);
-        if (d <= max_u64 / 100000000) {
-            x = d;
-            p += 8;
-        }
-        d = std.math.rotr(u64, x *% inv5p4, 4);
-        if (d <= max_u64 / 10000) {
-            x = d;
-            p += 4;
-        }
-        d = std.math.rotr(u64, x *% inv5p2, 2);
-        if (d <= max_u64 / 100) {
-            x = d;
-            p += 2;
-        }
-        d = std.math.rotr(u64, x *% inv5, 1);
-        if (d <= max_u64 / 10) {
-            x = d;
-            p += 1;
-        }
-        return .{ x, p };
-    } else {
-        if (x % 10 != 0) {
-            return .{ x, p };
-        }
-        x /= 10;
-        p += 1;
-
-        if (x % 100000000 == 0) {
-            x /= 100000000;
-            p += 8;
-        }
-        if (x % 10000 == 0) {
-            x /= 10000;
-            p += 4;
-        }
-        if (x % 100 == 0) {
-            x /= 100;
-            p += 2;
-        }
-        if (x % 10 == 0) {
-            x /= 10;
-            p += 1;
-        }
+    if (x % 10 != 0) {
         return .{ x, p };
     }
+    x /= 10;
+    p += 1;
+
+    if (x % 100000000 == 0) {
+        x /= 100000000;
+        p += 8;
+    }
+    if (x % 10000 == 0) {
+        x /= 10000;
+        p += 4;
+    }
+    if (x % 100 == 0) {
+        x /= 100;
+        p += 2;
+    }
+    if (x % 10 == 0) {
+        x /= 10;
+        p += 1;
+    }
+    return .{ x, p };
 }
 
 fn pow10Scaled(e: i32) [2]u64 {
@@ -742,10 +842,10 @@ fn pow10ScaledCompact(e: i32) [2]u64 {
     const off = i % f64_pow10_small_block_size;
 
     const a = f64_pow10_small_anchor[base];
-    if (off == 0) return .{ a.hi, a.lo };
+    if (off == 0) return a;
 
     // compute value from base offset
-    const anchor_m: u128 = (@as(u128, a.hi) << 64) - @as(u128, a.lo);
+    const anchor_m: u128 = (@as(u128, a[0]) << 64) - @as(u128, a[1]);
     const prod: u256 = @as(u256, anchor_m) * @as(u256, pow10[off]);
     const shift: u8 = @intCast((256 - @clz(prod)) - 128);
 
@@ -793,51 +893,51 @@ comptime {
     std.debug.assert(f64_pow10_small_block_size < pow10.len);
 }
 
-pub const f64_pow10_small_anchor = [_]struct { hi: u64, lo: u64 }{
-    .{ .hi = 0xfa8fd5a0081c0289, .lo = 0xe8cd3796329f1bac }, // 1e-348
-    .{ .hi = 0x8b16fb203055ac77, .lo = 0xb3c434afde5033ce }, // 1e-332
-    .{ .hi = 0x9a6bb0aa55653b2e, .lo = 0xb84dcc36dedac991 }, // 1e-316
-    .{ .hi = 0xab70fe17c79ac6cb, .lo = 0x92429cf5b7550bf9 }, // 1e-300
-    .{ .hi = 0xbe5691ef416bd60d, .lo = 0xdc33679439a92aac }, // 1e-284
-    .{ .hi = 0xd3515c2831559a84, .lo = 0xf2a5a4bb3578c1fc }, // 1e-268
-    .{ .hi = 0xea9c227723ee8bcc, .lo = 0xb9a1ea56863e3523 }, // 1e-252
-    .{ .hi = 0x823c12795db6ce58, .lo = 0x893ac2f72948f7a7 }, // 1e-236
-    .{ .hi = 0x9096ea6f38489850, .lo = 0xc00f2d37a21089de }, // 1e-220
-    .{ .hi = 0xa086cfcd97bf97f4, .lo = 0x7f175bf1332dd75b }, // 1e-204
-    .{ .hi = 0xb23867fb2a35b28e, .lo = 0x16619e65b0dc55bc }, // 1e-188
-    .{ .hi = 0xc5dd44271ad3cdbb, .lo = 0xbf100e1e7ac0d602 }, // 1e-172
-    .{ .hi = 0xdbac6c247d62a584, .lo = 0x20ba08b948b540c6 }, // 1e-156
-    .{ .hi = 0xf3e2f893dec3f127, .lo = 0xa576245c3c103305 }, // 1e-140
-    .{ .hi = 0x87625f056c7c4a8c, .lo = 0xeeb8e3289b52b68d }, // 1e-124
-    .{ .hi = 0x964e858c91ba2656, .lo = 0xc595f8072aef0790 }, // 1e-108
-    .{ .hi = 0xa6dfbd9fb8e5b88f, .lo = 0x34b332aff09446ad }, // 1e-92
-    .{ .hi = 0xb94470938fa89bcf, .lo = 0x07f71bf172a4c196 }, // 1e-76
-    .{ .hi = 0xcdb02555653131b7, .lo = 0xc86d0bed34f986b2 }, // 1e-60
-    .{ .hi = 0xe45c10c42a2b3b06, .lo = 0x734765824883af95 }, // 1e-44
-    .{ .hi = 0xfd87b5f28300ca0e, .lo = 0x74356291e777ac03 }, // 1e-28
-    .{ .hi = 0x8cbccc096f5088cc, .lo = 0x06c07848bbd1ba2c }, // 1e-12
-    .{ .hi = 0x9c40000000000000, .lo = 0x0000000000000000 }, // 1e4
-    .{ .hi = 0xad78ebc5ac620000, .lo = 0x0000000000000000 }, // 1e20
-    .{ .hi = 0xc097ce7bc90715b4, .lo = 0xb460f00000000000 }, // 1e36
-    .{ .hi = 0xd5d238a4abe98069, .lo = 0x8d5b6fba67292780 }, // 1e52
-    .{ .hi = 0xed63a231d4c4fb28, .lo = 0xb35855579c11b422 }, // 1e68
-    .{ .hi = 0x83c7088e1aab65dc, .lo = 0x86d9983925861f05 }, // 1e84
-    .{ .hi = 0x924d692ca61be759, .lo = 0xa6c3d9d98fa063a9 }, // 1e100
-    .{ .hi = 0xa26da3999aef774a, .lo = 0x1c41a1ccf0c70f62 }, // 1e116
-    .{ .hi = 0xb454e4a179dd1878, .lo = 0xd64541ba673cee04 }, // 1e132
-    .{ .hi = 0xc83553c5c8965d3e, .lo = 0x906d7d6b6b1a5338 }, // 1e148
-    .{ .hi = 0xde469fbd99a05fe4, .lo = 0x9035a07126510c44 }, // 1e164
-    .{ .hi = 0xf6c69a72a3989f5c, .lo = 0x7552ab61a8d8c2ba }, // 1e180
-    .{ .hi = 0x88fcf317f22241e3, .lo = 0xbbe0131c4207e0fc }, // 1e196
-    .{ .hi = 0x98165af37b2153df, .lo = 0x3c8d85cc85748fb5 }, // 1e212
-    .{ .hi = 0xa8d9d1535ce3b397, .lo = 0x80e7c658be5eb2f2 }, // 1e228
-    .{ .hi = 0xbb764c4ca7a44410, .lo = 0x6292e52be541c80e }, // 1e244
-    .{ .hi = 0xd01fef10a657842d, .lo = 0xd2d48a964fbcd27a }, // 1e260
-    .{ .hi = 0xe7109bfba19c0c9e, .lo = 0xf33aed98f587c52b }, // 1e276
-    .{ .hi = 0x80444b5e7aa7cf86, .lo = 0x867f2e9c30a47e4c }, // 1e292
-    .{ .hi = 0x8e679c2f5e44ff90, .lo = 0xa8f0f615581589b7 }, // 1e308
-    .{ .hi = 0x9e19db92b4e31baa, .lo = 0x93f85d3d957cb92e }, // 1e324
-    .{ .hi = 0xaf87023b9bf0ee6b, .lo = 0x1470528380797f4b }, // 1e340
+pub const f64_pow10_small_anchor = [_][2]u64{
+    .{ 0xfa8fd5a0081c0289, 0xe8cd3796329f1bac }, // 1e-348
+    .{ 0x8b16fb203055ac77, 0xb3c434afde5033ce }, // 1e-332
+    .{ 0x9a6bb0aa55653b2e, 0xb84dcc36dedac991 }, // 1e-316
+    .{ 0xab70fe17c79ac6cb, 0x92429cf5b7550bf9 }, // 1e-300
+    .{ 0xbe5691ef416bd60d, 0xdc33679439a92aac }, // 1e-284
+    .{ 0xd3515c2831559a84, 0xf2a5a4bb3578c1fc }, // 1e-268
+    .{ 0xea9c227723ee8bcc, 0xb9a1ea56863e3523 }, // 1e-252
+    .{ 0x823c12795db6ce58, 0x893ac2f72948f7a7 }, // 1e-236
+    .{ 0x9096ea6f38489850, 0xc00f2d37a21089de }, // 1e-220
+    .{ 0xa086cfcd97bf97f4, 0x7f175bf1332dd75b }, // 1e-204
+    .{ 0xb23867fb2a35b28e, 0x16619e65b0dc55bc }, // 1e-188
+    .{ 0xc5dd44271ad3cdbb, 0xbf100e1e7ac0d602 }, // 1e-172
+    .{ 0xdbac6c247d62a584, 0x20ba08b948b540c6 }, // 1e-156
+    .{ 0xf3e2f893dec3f127, 0xa576245c3c103305 }, // 1e-140
+    .{ 0x87625f056c7c4a8c, 0xeeb8e3289b52b68d }, // 1e-124
+    .{ 0x964e858c91ba2656, 0xc595f8072aef0790 }, // 1e-108
+    .{ 0xa6dfbd9fb8e5b88f, 0x34b332aff09446ad }, // 1e-92
+    .{ 0xb94470938fa89bcf, 0x07f71bf172a4c196 }, // 1e-76
+    .{ 0xcdb02555653131b7, 0xc86d0bed34f986b2 }, // 1e-60
+    .{ 0xe45c10c42a2b3b06, 0x734765824883af95 }, // 1e-44
+    .{ 0xfd87b5f28300ca0e, 0x74356291e777ac03 }, // 1e-28
+    .{ 0x8cbccc096f5088cc, 0x06c07848bbd1ba2c }, // 1e-12
+    .{ 0x9c40000000000000, 0x0000000000000000 }, // 1e4
+    .{ 0xad78ebc5ac620000, 0x0000000000000000 }, // 1e20
+    .{ 0xc097ce7bc90715b4, 0xb460f00000000000 }, // 1e36
+    .{ 0xd5d238a4abe98069, 0x8d5b6fba67292780 }, // 1e52
+    .{ 0xed63a231d4c4fb28, 0xb35855579c11b422 }, // 1e68
+    .{ 0x83c7088e1aab65dc, 0x86d9983925861f05 }, // 1e84
+    .{ 0x924d692ca61be759, 0xa6c3d9d98fa063a9 }, // 1e100
+    .{ 0xa26da3999aef774a, 0x1c41a1ccf0c70f62 }, // 1e116
+    .{ 0xb454e4a179dd1878, 0xd64541ba673cee04 }, // 1e132
+    .{ 0xc83553c5c8965d3e, 0x906d7d6b6b1a5338 }, // 1e148
+    .{ 0xde469fbd99a05fe4, 0x9035a07126510c44 }, // 1e164
+    .{ 0xf6c69a72a3989f5c, 0x7552ab61a8d8c2ba }, // 1e180
+    .{ 0x88fcf317f22241e3, 0xbbe0131c4207e0fc }, // 1e196
+    .{ 0x98165af37b2153df, 0x3c8d85cc85748fb5 }, // 1e212
+    .{ 0xa8d9d1535ce3b397, 0x80e7c658be5eb2f2 }, // 1e228
+    .{ 0xbb764c4ca7a44410, 0x6292e52be541c80e }, // 1e244
+    .{ 0xd01fef10a657842d, 0xd2d48a964fbcd27a }, // 1e260
+    .{ 0xe7109bfba19c0c9e, 0xf33aed98f587c52b }, // 1e276
+    .{ 0x80444b5e7aa7cf86, 0x867f2e9c30a47e4c }, // 1e292
+    .{ 0x8e679c2f5e44ff90, 0xa8f0f615581589b7 }, // 1e308
+    .{ 0x9e19db92b4e31baa, 0x93f85d3d957cb92e }, // 1e324
+    .{ 0xaf87023b9bf0ee6b, 0x1470528380797f4b }, // 1e340
 };
 
 // 2-bit correction codes
@@ -1559,6 +1659,11 @@ const f64_pow10_table = [f64_pow10_max - f64_pow10_min + 1][2]u64{
 };
 
 const builtin = @import("builtin");
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectError = std.testing.expectError;
+const expectApproxEqAbs = std.testing.expectApproxEqAbs;
+const epsilon = 1e-7;
 
 fn check(comptime T: type, value: T, comptime expected: []const u8) !void {
     const I = @Int(.unsigned, @bitSizeOf(T));
@@ -1574,10 +1679,16 @@ fn check(comptime T: type, value: T, comptime expected: []const u8) !void {
     const o_bits: I = @bitCast(o);
 
     if (std.math.isNan(value)) {
-        try std.testing.expect(std.math.isNan(o));
+        try expect(std.math.isNan(o));
     } else {
-        try std.testing.expectEqual(value_bits, o_bits);
+        try expectEqual(value_bits, o_bits);
     }
+}
+
+fn checkHex(comptime T: type, value: T, comptime expected: []const u8) !void {
+    var buf: [6000]u8 = undefined;
+    const s = try format(T, &buf, value, .{ .mode = .hex });
+    try std.testing.expectEqualStrings(expected, s);
 }
 
 test "format f64" {
@@ -1629,21 +1740,34 @@ test "format f64" {
     try check(f64, 4.294967298, "4.294967298e0");
 }
 
-const testing = std.testing;
-const expectEqual = testing.expectEqual;
-const expect = testing.expect;
-const expectError = testing.expectError;
-const math = std.math;
-const approxEqAbs = math.approxEqAbs;
-const epsilon = 1e-7;
+test "format hex f64" {
+    try checkHex(f64, 0.0, "0x0p0");
+    try checkHex(f64, -0.0, "-0x0p0");
+    try checkHex(f64, 1.0, "0x1p0");
+    try checkHex(f64, -1.0, "-0x1p0");
+    try checkHex(f64, 0.5, "0x1p-1");
+    try checkHex(f64, 1.5, "0x1.8p0");
+    try checkHex(f64, 3.0, "0x1.8p1");
+
+    try checkHex(f64, std.math.inf(f64), "inf");
+    try checkHex(f64, -std.math.inf(f64), "-inf");
+    try checkHex(f64, std.math.nan(f64), "nan");
+
+    try checkHex(f64, std.math.floatMin(f64), "0x1p-1022");
+    try checkHex(f64, -std.math.floatMin(f64), "-0x1p-1022");
+    //try checkHex(f64, std.math.floatTrueMin(f64), "0x1p-1074");
+    //try checkHex(f64, -std.math.floatTrueMin(f64), "-0x1p-1074");
+    try checkHex(f64, std.math.floatMax(f64), "0x1.fffffffffffffp1023");
+}
 
 test parse {
     inline for ([_]type{f64}) |T| {
-        try testing.expectError(error.InvalidCharacter, parse(T, ""));
-        try testing.expectError(error.InvalidCharacter, parse(T, "   1"));
-        try testing.expectError(error.InvalidCharacter, parse(T, "1abc"));
-        try testing.expectError(error.InvalidCharacter, parse(T, "+"));
-        try testing.expectError(error.InvalidCharacter, parse(T, "-"));
+        try expectError(error.Empty, parse(T, ""));
+        try expectError(error.NoDigits, parse(T, "   1"));
+        try expectError(error.TrailingData, parse(T, "1abc"));
+        try expectError(error.NoDigits, parse(T, "+"));
+        try expectError(error.NoDigits, parse(T, "-"));
+        try expectError(error.NoDigitAfterExponent, parse(T, "1e+"));
 
         try expectEqual(try parse(T, "0"), 0.0);
         try expectEqual(try parse(T, "0"), 0.0);
@@ -1657,39 +1781,41 @@ test parse {
         try expectEqual(try parse(T, "-1e0"), -1.0);
         try expectEqual(try parse(T, "1.234e3"), 1234);
 
-        try expect(approxEqAbs(T, try parse(T, "3.141"), 3.141, epsilon));
-        try expect(approxEqAbs(T, try parse(T, "-3.141"), -3.141, epsilon));
+        try expectApproxEqAbs(@as(T, 3.141), try parse(T, "3.141"), epsilon);
+        try expectApproxEqAbs(@as(T, -3.141), try parse(T, "-3.141"), epsilon);
 
         try expectEqual(try parse(T, "1e-5000"), 0);
         try expectEqual(try parse(T, "1e+5000"), std.math.inf(T));
 
         try expectEqual(try parse(T, "0.4e0066999999999999999999999999999999999999999999999999999"), std.math.inf(T));
-        //try expect(approxEqAbs(T, try parse(T, "0_1_2_3_4_5_6.7_8_9_0_0_0e0_0_1_0"), @as(T, 123456.789000e10), epsilon)); // TODO
+        try expectApproxEqAbs(@as(T, 123456.78900e10), try parse(T, "0123456.789000e0010"), epsilon);
+        try expectApproxEqAbs(@as(T, 123456.789000e10), try parse(T, "0123456.789000e0010"), epsilon);
+        try expectApproxEqAbs(@as(T, 123456.789000e10), try parse(T, "0_1_2_3_4_5_6.7_8_9_0_0_0e0_0_1_0"), epsilon);
 
         // underscore rule is simple and reduces to "can only occur between two digits" and multiple are not supported.
-        try expectError(error.InvalidCharacter, parse(T, "0123456.789000e_0010")); // cannot occur immediately after exponent
-        try expectError(error.InvalidCharacter, parse(T, "_0123456.789000e0010")); // cannot occur before any digits
-        try expectError(error.InvalidCharacter, parse(T, "0__123456.789000e_0010")); // cannot occur twice in a row
-        try expectError(error.InvalidCharacter, parse(T, "0123456_.789000e0010")); // cannot occur before decimal point
-        try expectError(error.InvalidCharacter, parse(T, "0123456.789000e0010_")); // cannot occur at end of number
+        try expectError(error.InvalidUnderscores, parse(T, "0123456.789000e_0010")); // cannot occur immediately after exponent
+        try expectError(error.InvalidUnderscores, parse(T, "_0123456.789000e0010")); // cannot occur before any digits
+        try expectError(error.InvalidUnderscores, parse(T, "0__123456.789000e_0010")); // cannot occur twice in a row
+        try expectError(error.InvalidUnderscores, parse(T, "0123456_.789000e0010")); // cannot occur before decimal point
+        try expectError(error.InvalidUnderscores, parse(T, "0123456.789000e0010_")); // cannot occur at end of number
 
-        try expect(approxEqAbs(T, try parse(T, "1e-2"), 0.01, epsilon));
-        try expect(approxEqAbs(T, try parse(T, "1234e-2"), 12.34, epsilon));
+        try expectApproxEqAbs(@as(T, 0.01), try parse(T, "1e-2"), epsilon);
+        try expectApproxEqAbs(@as(T, 12.34), try parse(T, "1234e-2"), epsilon);
 
-        try expect(approxEqAbs(T, try parse(T, "1."), 1, epsilon));
-        try expect(approxEqAbs(T, try parse(T, "0."), 0, epsilon));
-        try expect(approxEqAbs(T, try parse(T, ".1"), 0.1, epsilon));
-        try expect(approxEqAbs(T, try parse(T, ".0"), 0, epsilon));
-        try expect(approxEqAbs(T, try parse(T, ".1e-1"), 0.01, epsilon));
+        try expectApproxEqAbs(@as(T, 1), try parse(T, "1."), epsilon);
+        try expectApproxEqAbs(@as(T, 0), try parse(T, "0."), epsilon);
+        try expectApproxEqAbs(@as(T, 0.1), try parse(T, ".1"), epsilon);
+        try expectApproxEqAbs(@as(T, 0), try parse(T, ".0"), epsilon);
+        try expectApproxEqAbs(@as(T, 0.01), try parse(T, ".1e-1"), epsilon);
 
-        try expectError(error.InvalidCharacter, parse(T, ".")); // At least one digit is required.
-        try expectError(error.InvalidCharacter, parse(T, ".e1")); // At least one digit is required.
-        try expectError(error.InvalidCharacter, parse(T, "0.e")); // At least one digit is required.
+        try expectError(error.NoDigits, parse(T, ".")); // At least one digit is required.
+        try expectError(error.NoDigits, parse(T, ".e1")); // At least one digit is required.
+        try expectError(error.TrailingData, parse(T, "0.e")); // At least one digit is required.
 
-        try expect(approxEqAbs(T, try parse(T, "123142.1"), 123142.1, epsilon));
-        try expect(approxEqAbs(T, try parse(T, "-123142.1124"), @as(T, -123142.1124), epsilon));
-        try expect(approxEqAbs(T, try parse(T, "0.7062146892655368"), @as(T, 0.7062146892655368), epsilon));
-        try expect(approxEqAbs(T, try parse(T, "2.71828182845904523536"), @as(T, 2.718281828459045), epsilon));
+        try expectApproxEqAbs(@as(T, 123142.1), try parse(T, "123142.1"), epsilon);
+        try expectApproxEqAbs(@as(T, -123142.1124), try parse(T, "-123142.1124"), epsilon);
+        try expectApproxEqAbs(@as(T, 0.7062146892655368), try parse(T, "0.7062146892655368"), epsilon);
+        try expectApproxEqAbs(@as(T, 2.718281828459045), try parse(T, "2.71828182845904523536"), epsilon);
     }
 }
 
@@ -1718,108 +1844,107 @@ test "largest normals" {
 //test "many_digits hex" {
 //    const a: f32 = try parse(f32, "0xffffffffffffffff.0p0");
 //    const b: f32 = @floatCast(try parse(f128, "0xffffffffffffffff.0p0"));
-//    try std.testing.expectEqual(a, b);
+//    try expectEqual(a, b);
 //}
 //
 //test "hex.special" {
-//    try testing.expect(math.isNan(try parse(f32, "nAn")));
-//    try testing.expect(math.isPositiveInf(try parse(f32, "iNf")));
-//    try testing.expect(math.isPositiveInf(try parse(f32, "+Inf")));
-//    try testing.expect(math.isNegativeInf(try parse(f32, "-iNf")));
-//
-//    try testing.expect(math.isPositiveInf(try parse(f32, "0x9999p9999")));
-//    try testing.expect(math.isNegativeInf(try parse(f32, "-0x9999p9999")));
+//    try expect(math.isNan(try parse(f32, "nAn")));
+//    try expect(math.isPositiveInf(try parse(f32, "iNf")));
+//    try expect(math.isPositiveInf(try parse(f32, "+Inf")));
+//    try expect(math.isNegativeInf(try parse(f32, "-iNf")));
+//    try expect(math.isPositiveInf(try parse(f32, "0x9999p9999")));
+//    try expect(math.isNegativeInf(try parse(f32, "-0x9999p9999")));
 //}
 //
 //test "hex.zero" {
-//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "0x0"));
-//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "-0x0"));
-//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "0x0p42"));
-//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "-0x0.00000p42"));
-//    try testing.expectEqual(@as(f32, 0.0), try parse(f32, "0x0.00000p666"));
+//    try expectEqual(@as(f32, 0.0), try parse(f32, "0x0"));
+//    try expectEqual(@as(f32, 0.0), try parse(f32, "-0x0"));
+//    try expectEqual(@as(f32, 0.0), try parse(f32, "0x0p42"));
+//    try expectEqual(@as(f32, 0.0), try parse(f32, "-0x0.00000p42"));
+//    try expectEqual(@as(f32, 0.0), try parse(f32, "0x0.00000p666"));
 //}
 //
 //test "hex.f16" {
-//    try testing.expectEqual(try parse(f16, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parse(f16, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parse(f16, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parse(f16, "0x10p-10"), 0.015625);
+//    try expectEqual(try parse(f16, "0x1p0"), 1.0);
+//    try expectEqual(try parse(f16, "-0x1p-1"), -0.5);
+//    try expectEqual(try parse(f16, "0x10p+10"), 16384.0);
+//    try expectEqual(try parse(f16, "0x10p-10"), 0.015625);
 //    // Max normalized value.
-//    try testing.expectEqual(try parse(f16, "0x1.ffcp+15"), math.floatMax(f16));
-//    try testing.expectEqual(try parse(f16, "-0x1.ffcp+15"), -math.floatMax(f16));
+//    try expectEqual(try parse(f16, "0x1.ffcp+15"), std.math.floatMax(f16));
+//    try expectEqual(try parse(f16, "-0x1.ffcp+15"), -std.math.floatMax(f16));
 //    // Min normalized value.
-//    try testing.expectEqual(try parse(f16, "0x1p-14"), math.floatMin(f16));
-//    try testing.expectEqual(try parse(f16, "-0x1p-14"), -math.floatMin(f16));
+//    try expectEqual(try parse(f16, "0x1p-14"), std.math.floatMin(f16));
+//    try expectEqual(try parse(f16, "-0x1p-14"), -std.math.floatMin(f16));
 //    // Min denormal value.
-//    try testing.expectEqual(try parse(f16, "0x1p-24"), math.floatTrueMin(f16));
-//    try testing.expectEqual(try parse(f16, "-0x1p-24"), -math.floatTrueMin(f16));
+//    try expectEqual(try parse(f16, "0x1p-24"), std.math.floatTrueMin(f16));
+//    try expectEqual(try parse(f16, "-0x1p-24"), -std.math.floatTrueMin(f16));
 //}
 
 //test "hex.f32" {
-//    try testing.expectError(error.InvalidCharacter, parse(f32, "0x"));
-//    try testing.expectEqual(try parse(f32, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parse(f32, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parse(f32, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parse(f32, "0x10p-10"), 0.015625);
-//    try testing.expectEqual(try parse(f32, "0x0.ffffffp128"), 0x0.ffffffp128);
-//    try testing.expectEqual(try parse(f32, "0x0.1234570p-125"), 0x0.1234570p-125);
+//    try expectError(error.InvalidCharacter, parse(f32, "0x"));
+//    try expectEqual(try parse(f32, "0x1p0"), 1.0);
+//    try expectEqual(try parse(f32, "-0x1p-1"), -0.5);
+//    try expectEqual(try parse(f32, "0x10p+10"), 16384.0);
+//    try expectEqual(try parse(f32, "0x10p-10"), 0.015625);
+//    try expectEqual(try parse(f32, "0x0.ffffffp128"), 0x0.ffffffp128);
+//    try expectEqual(try parse(f32, "0x0.1234570p-125"), 0x0.1234570p-125);
 //    // Max normalized value.
-//    try testing.expectEqual(try parse(f32, "0x1.fffffeP+127"), math.floatMax(f32));
-//    try testing.expectEqual(try parse(f32, "-0x1.fffffeP+127"), -math.floatMax(f32));
+//    try expectEqual(try parse(f32, "0x1.fffffeP+127"), std.math.floatMax(f32));
+//    try expectEqual(try parse(f32, "-0x1.fffffeP+127"), -std.math.floatMax(f32));
 //    // Min normalized value.
-//    try testing.expectEqual(try parse(f32, "0x1p-126"), math.floatMin(f32));
-//    try testing.expectEqual(try parse(f32, "-0x1p-126"), -math.floatMin(f32));
+//    try expectEqual(try parse(f32, "0x1p-126"), std.math.floatMin(f32));
+//    try expectEqual(try parse(f32, "-0x1p-126"), -std.math.floatMin(f32));
 //    // Min denormal value.
-//    try testing.expectEqual(try parse(f32, "0x1P-149"), math.floatTrueMin(f32));
-//    try testing.expectEqual(try parse(f32, "-0x1P-149"), -math.floatTrueMin(f32));
+//    try expectEqual(try parse(f32, "0x1P-149"), std.math.floatTrueMin(f32));
+//    try expectEqual(try parse(f32, "-0x1P-149"), -std.math.floatTrueMin(f32));
 //}
 
 test "hex.f64" {
-    try testing.expectEqual(try parse(f64, "0x1p0"), 1.0);
-    try testing.expectEqual(try parse(f64, "-0x1p-1"), -0.5);
-    try testing.expectEqual(try parse(f64, "0x10p+10"), 16384.0);
-    try testing.expectEqual(try parse(f64, "0x10p-10"), 0.015625);
+    try expectEqual(try parse(f64, "0x1p0"), 1.0);
+    try expectEqual(try parse(f64, "-0x1p-1"), -0.5);
+    try expectEqual(try parse(f64, "0x10p+10"), 16384.0);
+    try expectEqual(try parse(f64, "0x10p-10"), 0.015625);
     // Max normalized value.
-    //try testing.expectEqual(try parse(f64, "0x1.fffffffffffffp+1023"), math.floatMax(f64));
-    //try testing.expectEqual(try parse(f64, "-0x1.fffffffffffffp1023"), -math.floatMax(f64));
+    //try expectEqual(try parse(f64, "0x1.fffffffffffffp+1023"), std.math.floatMax(f64));
+    //try expectEqual(try parse(f64, "-0x1.fffffffffffffp1023"), -std.math.floatMax(f64));
     // Min normalized value.
-    try testing.expectEqual(try parse(f64, "0x1p-1022"), math.floatMin(f64));
-    try testing.expectEqual(try parse(f64, "-0x1p-1022"), -math.floatMin(f64));
+    try expectEqual(try parse(f64, "0x1p-1022"), std.math.floatMin(f64));
+    try expectEqual(try parse(f64, "-0x1p-1022"), -std.math.floatMin(f64));
     // Min denormalized value.
-    try testing.expectEqual(try parse(f64, "0x1p-1074"), math.floatTrueMin(f64));
-    try testing.expectEqual(try parse(f64, "-0x1p-1074"), -math.floatTrueMin(f64));
+    try expectEqual(try parse(f64, "0x1p-1074"), std.math.floatTrueMin(f64));
+    try expectEqual(try parse(f64, "-0x1p-1074"), -std.math.floatTrueMin(f64));
 }
 
 //test "hex.f80" {
-//    try testing.expectEqual(try parse(f80, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parse(f80, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parse(f80, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parse(f80, "0x10p-10"), 0.015625);
+//    try expectEqual(try parse(f80, "0x1p0"), 1.0);
+//    try expectEqual(try parse(f80, "-0x1p-1"), -0.5);
+//    try expectEqual(try parse(f80, "0x10p+10"), 16384.0);
+//    try expectEqual(try parse(f80, "0x10p-10"), 0.015625);
 //    // Max normalized value.
-//    try testing.expectEqual(try parse(f80, "0xf.fffffffffffffff7p+16380"), math.floatMax(f80));
-//    try testing.expectEqual(try parse(f80, "-0xf.fffffffffffffff7p+16380"), -math.floatMax(f80));
+//    try expectEqual(try parse(f80, "0xf.fffffffffffffff7p+16380"), std.math.floatMax(f80));
+//    try expectEqual(try parse(f80, "-0xf.fffffffffffffff7p+16380"), -std.math.floatMax(f80));
 //    // Min normalized value.
-//    try testing.expectEqual(try parse(f80, "0x1p-16382"), math.floatMin(f80));
-//    try testing.expectEqual(try parse(f80, "-0x1p-16382"), -math.floatMin(f80));
+//    try expectEqual(try parse(f80, "0x1p-16382"), std.math.floatMin(f80));
+//    try expectEqual(try parse(f80, "-0x1p-16382"), -std.math.floatMin(f80));
 //    // Min denormalized value.
-//    try testing.expectEqual(try parse(f80, "0x1p-16445"), math.floatTrueMin(f80));
-//    try testing.expectEqual(try parse(f80, "-0x1p-16445"), -math.floatTrueMin(f80));
+//    try expectEqual(try parse(f80, "0x1p-16445"), std.math.floatTrueMin(f80));
+//    try expectEqual(try parse(f80, "-0x1p-16445"), -std.math.floatTrueMin(f80));
 //}
 //
 //test "hex.f128" {
-//    try testing.expectEqual(try parse(f128, "0x1p0"), 1.0);
-//    try testing.expectEqual(try parse(f128, "-0x1p-1"), -0.5);
-//    try testing.expectEqual(try parse(f128, "0x10p+10"), 16384.0);
-//    try testing.expectEqual(try parse(f128, "0x10p-10"), 0.015625);
+//    try expectEqual(try parse(f128, "0x1p0"), 1.0);
+//    try expectEqual(try parse(f128, "-0x1p-1"), -0.5);
+//    try expectEqual(try parse(f128, "0x10p+10"), 16384.0);
+//    try expectEqual(try parse(f128, "0x10p-10"), 0.015625);
 //    // Max normalized value.
-//    try testing.expectEqual(try parse(f128, "0xf.fffffffffffffffffffffffffff8p+16380"), math.floatMax(f128));
-//    try testing.expectEqual(try parse(f128, "-0xf.fffffffffffffffffffffffffff8p+16380"), -math.floatMax(f128));
+//    try expectEqual(try parse(f128, "0xf.fffffffffffffffffffffffffff8p+16380"), std.math.floatMax(f128));
+//    try expectEqual(try parse(f128, "-0xf.fffffffffffffffffffffffffff8p+16380"), -std.math.floatMax(f128));
 //    // Min normalized value.
-//    try testing.expectEqual(try parse(f128, "0x1p-16382"), math.floatMin(f128));
-//    try testing.expectEqual(try parse(f128, "-0x1p-16382"), -math.floatMin(f128));
+//    try expectEqual(try parse(f128, "0x1p-16382"), std.math.floatMin(f128));
+//    try expectEqual(try parse(f128, "-0x1p-16382"), -std.math.floatMin(f128));
 //    // Min denormalized value.
-//    try testing.expectEqual(try parse(f128, "0x1p-16494"), math.floatTrueMin(f128));
-//    try testing.expectEqual(try parse(f128, "-0x1p-16494"), -math.floatTrueMin(f128));
+//    try expectEqual(try parse(f128, "0x1p-16494"), std.math.floatTrueMin(f128));
+//    try expectEqual(try parse(f128, "-0x1p-16494"), -std.math.floatTrueMin(f128));
 //    // ensure round-to-even
-//    try testing.expectEqual(try parse(f128, "0x1.edcb34a235253948765432134674fp-1"), 0x1.edcb34a235253948765432134674fp-1);
+//    try expectEqual(try parse(f128, "0x1.edcb34a235253948765432134674fp-1"), 0x1.edcb34a235253948765432134674fp-1);
 //}
